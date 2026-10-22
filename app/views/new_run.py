@@ -29,9 +29,10 @@ HELP = {
     "max_fill": "Maximum allowed conduit fill from the project standard (40% is typical). Spare capacity is "
                 "measured against it.",
     "overrides": 'Use a different conduit for specific cable types, for example '
-                 '{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}. Leave {} if all cables share one conduit.',
+                 '{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}. Names must match the Cable Type table '
+                 'on the drawing exactly. Leave {} if all cables share one conduit.',
     "cable_qty": 'Number of cables of a type in one conduit, when more than one, for example {"CAT6 / Fibre": 2}. '
-                 'Types not listed count as 1.',
+                 'Names must match the Cable Type table on the drawing exactly. Types not listed count as 1.',
     "device_type": "Device type code as shown in the device tag on the drawing, for example PIR or L1.2.",
     "height": "Mounting height in millimetres, for example 2400.",
     "reference": "Needed only when a comment asks to restore room names or space IDs. Upload the architectural "
@@ -47,10 +48,9 @@ STAGES = {"extract": "Reading consultant comments", "plan": "Planning fixes",
 
 
 def _default_inputs():
-    try:
-        return json.loads(config.INPUTS_EXAMPLE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    """Neutral starting values: a common conduit spec and nothing project-specific. Back box size, overrides,
+    quantities and elevations stay empty so only what the user enters is written onto the drawing."""
+    return {"conduit": dict(config.CONDUIT)}
 
 
 def _safe_name(name):

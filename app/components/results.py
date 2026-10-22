@@ -102,6 +102,7 @@ def _summary(d, ex, plan, chg, run, key):
     for ch in chg["changes"]:
         by_comment.setdefault(ch["comment_id"], []).append(ch)
     resolution = {r["comment_id"]: r for r in chg.get("resolution", [])}
+    _inputs_check(run.get("inputs") or {}, chg)
     if resolution:
         st.subheader("Comment resolution")
         cols = st.columns(len(RESOLUTION_LABEL))
@@ -151,6 +152,62 @@ def _summary(d, ex, plan, chg, run, key):
         st.subheader("Other markups (not comments)")
         st.dataframe(pd.DataFrame([{"Kind": o["kind"], "Text": clean(o["text"]) or "-", "Author": o.get("author", "")}
                                    for o in others]), hide_index=True, width="stretch")
+
+
+def _conduit_types(chg):
+    """Cable types in the conduit fill table this run added, or None when no table was added."""
+    for ch in chg["changes"]:
+        if ch["op"] == "add_conduit_fill_table":
+            try:
+                return [r["Cable Type"] for r in json.loads(ch.get("after") or "[]")]
+            except (ValueError, TypeError, KeyError):
+                return []
+    return None
+
+
+def unused_inputs(inputs, chg):
+    """Engineer inputs that had no effect on this run, each with the reason (shown so nothing fails silently)."""
+    notes = []
+    types = _conduit_types(chg)
+    for field, label in (("conduit_overrides", "Conduit override"), ("cable_qty", "Cable quantity")):
+        names = list((inputs.get(field) or {}).keys())
+        if not names:
+            continue
+        if types is None:
+            notes.append(f"{label} values were not used: no comment asked for a conduit fill calculation.")
+            continue
+        for name in names:
+            if name not in types:
+                notes.append(f"{label} '{name}' was not used: it does not match a cable type on this drawing. "
+                             f"Cable types on this drawing: {', '.join(types)}.")
+    heights = inputs.get("elevations") or {}
+    if heights:
+        missing = chg.get("missing_elevations")
+        unlabelled = sorted({m["type"] for m in missing or []})
+        if not missing and not any(f.get("op") == "mark_missing_elevations" for f in chg["failures"]) \
+                and not any(c["op"] == "mark_missing_elevations" for c in chg["changes"]):
+            notes.append("Device elevations were not used: no comment asked for device elevations.")
+        else:
+            for kind in heights:
+                if kind not in unlabelled:
+                    notes.append(f"Device elevation for '{kind}' was not used: no device of that type is missing "
+                                 "an elevation label. Types missing a label: "
+                                 f"{', '.join(unlabelled) or 'none'}.")
+    size = (inputs.get("backbox_size") or "").strip()
+    if size and not any(size in f"{c.get('after') or ''} {c['description']}" for c in chg["changes"]):
+        notes.append(f"Back box size '{size}' was not used: no change on this drawing needed it.")
+    return notes
+
+
+def _inputs_check(inputs, chg):
+    notes = unused_inputs(inputs, chg)
+    for n in notes:
+        st.warning(clean(n))
+    shown = {k: v for k, v in inputs.items() if k != "reference_pdf" and v not in ({}, "", None)}
+    if inputs.get("reference_pdf"):
+        shown["reference_drawing"] = Path(inputs["reference_pdf"]).name
+    with st.expander("Engineer inputs used for this run"):
+        st.json(shown)
 
 
 def _missing_elevations(items):
