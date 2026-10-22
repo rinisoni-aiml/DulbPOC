@@ -8,7 +8,7 @@ import base64
 import json
 from concurrent.futures import ThreadPoolExecutor
 
-from .. import config
+from ..core import config
 
 SCOPES = ["local", "sheet_wide", "legend", "layout", "calculation", "external_input"]
 OP_TYPES = ["replace_text", "swap_symbol", "add_conduit_fill_table", "add_note"]
@@ -76,7 +76,9 @@ symbol. Both must be legend labels copied exactly from SHEET TEXT (legend=true).
 area, conduit size, fill %, spare %). The program computes every number from the sheet's own Cable Type \
 table and ENGINEER INPUTS; you only give the rationale.
 - add_note: add a short drafting note (max 120 characters) near the tip, in `text`. Use it only to \
-record a reference that is stated in the comment itself (e.g. an RFI number or a drawing cross-reference).
+record a reference that is stated in the comment itself (e.g. an RFI number or a drawing cross-reference). \
+State the reference only; never claim that something is attached, approved, received or done \
+(e.g. "REFER TO RFI ECJ-RFI-001632 FOR DEVICE ELEVATIONS", not "... (ATTACHED)").
 
 Rules:
 - Never invent engineering data: no dimensions, sizes, positions, room names, drawing numbers or \
@@ -181,6 +183,7 @@ def plan_llm(extracted, sheet_text, out_dir, inputs):
         text = next(b.text for b in resp.content if b.type == "text")
         out = json.loads(text)
         out["comment_id"] = c["id"]
+        out["checklist"] = out["checklist"][:config.CHECKLIST_MAX]
         return out
 
     comments = extracted["comments"]

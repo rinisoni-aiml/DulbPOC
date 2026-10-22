@@ -1,4 +1,4 @@
-from rectify.engineering.conduit import conduit_fill
+from rectify.domain.conduit import conduit_fill
 
 
 def test_fill_matches_human_revision():

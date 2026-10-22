@@ -5,60 +5,41 @@ Stages can also be run one at a time; each reads the previous stage's JSON from 
 so an engineer can edit plan.json by hand and re-run `apply` alone.
 """
 import argparse
-import json
 import sys
 import time
-from pathlib import Path
 
-from . import config
-
-
-def _out(pdf, out):
-    return Path(out) if out else config.OUT_DIR / Path(pdf).stem
-
-
-def _load(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def _inputs(path):
-    return _load(path) if path else {}
+from .services import rectification as svc
 
 
 def cmd_extract(a):
-    from .stages.extract import extract
-    out = _out(a.pdf, a.out)
-    ex, _ = extract(Path(a.pdf), out)
-    print(f"extract: {len(ex['comments'])} comments, {sum(len(c['tips']) for c in ex['comments'])} leader tips, "
-          f"{len(ex['other_markups'])} other markups -> {out / 'comments.json'}")
+    r = svc.extract_drawing(a.pdf, svc.output_dir(a.pdf, a.out))
+    print(f"extract: {r['comments']} comments, {r['tips']} leader tips, "
+          f"{r['other_markups']} other markups -> {r['path']}")
 
 
 def cmd_plan(a):
-    from .stages.plan import plan
-    out = _out(a.pdf, a.out)
-    p = plan(_load(out / "comments.json"), _load(out / "sheet_text.json"), out, _inputs(a.inputs), a.planner)
-    ops = sum(len(c["ops"]) for c in p["comments"])
-    cost = f", ${p['usage']['usd']:.3f}" if p.get("usage") else ""
-    print(f"plan ({p['planner']}{cost}): {ops} ops, "
-          f"{sum(len(c['checklist']) for c in p['comments'])} checklist items -> {out / 'plan.json'}")
-    errors = {c["intent"] for c in p["comments"] if c["intent"].startswith("Planner ")}
-    for e in errors:
+    try:
+        r = svc.plan_fixes(svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs), a.planner)
+    except svc.RectifyError as e:
+        raise SystemExit(str(e)) from None
+    cost = f", ${r['usage']['usd']:.3f}" if r["usage"] else ""
+    print(f"plan ({r['planner']}{cost}): {r['ops']} ops, {r['checklist_items']} checklist items -> {r['path']}")
+    for e in r["warnings"]:
         print(f"  WARNING: {e}")
 
 
 def cmd_apply(a):
-    from .stages.apply import Rectifier
-    from .stages.report import build
-    out = _out(a.pdf, a.out)
-    ex, p = _load(out / "comments.json"), _load(out / "plan.json")
-    r = Rectifier(Path(a.pdf), ex, _inputs(a.inputs))
-    changes, failures = r.run(p)
-    r.save(out / "corrected.pdf")
-    print(f"apply: {len(changes)} edits, {len(r.skipped)} already covered, {len(failures)} ops left for the "
-          f"engineer, {r.markups_removed} markups removed -> {out / 'corrected.pdf'}")
-    integ, checklist = build(Path(a.pdf), out, ex, p, changes, failures, r.markups_removed, r.skipped)
-    print(f"report: {len(checklist)} checklist items, {integ['share']:.4%} of sheet changed outside edits "
-          f"-> {out / 'report.html'}")
+    applied, report = svc.apply_fixes(a.pdf, svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs))
+    print(f"apply: {applied['edits']} edits, {applied['skipped']} already covered, {applied['failures']} ops left "
+          f"for the engineer, {applied['markups_removed']} markups removed -> {applied['path']}")
+    print(f"report: {report['checklist_items']} checklist items, {report['integrity']['share']:.4%} of sheet changed "
+          f"outside edits -> {report['path']}")
+
+
+def cmd_verify(a):
+    r = svc.verify_against(a.pdf, a.revised, svc.output_dir(a.pdf, a.out))
+    print(f"verify: {r['fixed']} fixed, {r['partial']} partially fixed, {r['not_fixed']} not fixed; "
+          f"{r['checks_passed']}/{r['checks']} file checks passed -> {r['path']}")
 
 
 def cmd_run(a):
@@ -80,6 +61,11 @@ def main(argv=None):
         sp.add_argument("--planner", choices=["auto", "llm", "rules"], default="auto",
                         help="auto = Claude if ANTHROPIC_API_KEY is set, else the rules baseline")
         sp.set_defaults(fn=fn)
+    sp = sub.add_parser("verify", help="compare corrected.pdf with the original and a human revision (no API)")
+    sp.add_argument("pdf", help="the original consultant-commented PDF")
+    sp.add_argument("--revised", help="human-revised PDF to compare against (ground truth)")
+    sp.add_argument("--out", help="output folder of a previous run (default out/<pdf name>)")
+    sp.set_defaults(fn=cmd_verify)
     a = ap.parse_args(argv)
     a.fn(a)
 

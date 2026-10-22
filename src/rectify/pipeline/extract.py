@@ -5,7 +5,7 @@ from collections import Counter
 
 import pymupdf
 
-from .. import config
+from ..core import config
 from ..pdf.geometry import (find_legend, open_clean, rect_list, render_png, text_lines, to_vis,
                      words_near)
 

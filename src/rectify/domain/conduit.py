@@ -4,7 +4,7 @@ import re
 
 import pymupdf
 
-from .. import config
+from ..core import config
 
 NUM = re.compile(r"^\d+(\.\d+)?$")
 

@@ -6,7 +6,7 @@ import numpy as np
 import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
-from .. import config
+from ..core import config
 from ..pdf.geometry import open_clean
 
 
@@ -156,8 +156,8 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
     usage = plan.get("usage") or {}
     parts = [f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' "
              f"content='width=device-width,initial-scale=1'><title>Rectification Report</title><style>{CSS}</style></head><body><main>",
-             f"<h1>Drawing rectification report</h1><p class='sub'>{e(meta['source_name'])} · planner: "
-             f"<code>{e(plan['planner'])}</code>" + (f" · LLM cost ${usage.get('usd', 0):.3f}" if usage else "") + "</p>",
+             f"<h1>Drawing rectification report</h1><p class='sub'>{e(meta['source_name'])} | planner: "
+             f"<code>{e(plan['planner'])}</code>" + (f" | LLM cost ${usage.get('usd', 0):.3f}" if usage else "") + "</p>",
              "<div class='kpis'>",
              f"<div class='kpi'><b>{len(extracted['comments'])}</b><span>consultant comments</span></div>",
              f"<div class='kpi'><b>{len(changes)}</b><span>vector edits applied</span></div>",
@@ -181,7 +181,7 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
         if p.get("intent"):
             parts.append(f"<p><b>Intent:</b> {e(p['intent'])}</p>")
         for ch in by_comment.get(c["id"], []):
-            parts.append(f"<p><b>{e(ch['id'])}</b> — {e(ch['description'])}</p>")
+            parts.append(f"<p><b>{e(ch['id'])}</b>: {e(ch['description'])}</p>")
             if ch.get("image"):
                 parts.append(f"<img src='{e(ch['image'])}' alt='Before and after {e(ch['id'])}' loading='lazy'>")
         notes = [f"<li>Covered ({e(s['op'])}): {e(s['reason'])}</li>"
@@ -192,7 +192,7 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
             parts.append("<ul>" + "".join(notes) + "</ul>")
         if p.get("checklist"):
             parts.append("<p><b>For the engineer:</b></p><ul>" + "".join(
-                f"<li>{e(k['item'])} <i>— needs: {e(', '.join(k['inputs_needed']))}</i></li>"
+                f"<li>{e(k['item'])} <i>(needs: {e(', '.join(k['inputs_needed']))})</i></li>"
                 for k in p["checklist"]) + "</ul>")
         parts.append("</div>")
     parts.append("<h2>Engineer checklist</h2><table><tr><th>Comment</th><th>Action</th><th>Inputs needed</th><th>Where</th></tr>")

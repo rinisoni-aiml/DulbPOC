@@ -15,6 +15,12 @@ def _project_root():
 
 ROOT = _project_root()
 OUT_DIR = ROOT / "out"
+# Web app storage: SQLite run history + one folder per run. RECTIFY_DATA_DIR overrides.
+DATA_DIR = Path(os.getenv("RECTIFY_DATA_DIR") or ROOT / "data").resolve()
+RUNS_DIR = DATA_DIR / "runs"
+DB_PATH = DATA_DIR / "rectify.db"
+SAMPLES_DIR = ROOT / "samples"
+INPUTS_EXAMPLE = ROOT / "config" / "inputs.example.json"
 
 
 def load_env():
@@ -77,7 +83,10 @@ FONT_FILES = {           # drawing font family -> local TTF (falls back to Helve
     "Calibri,Bold": "calibrib.ttf",
     "SegoeUI": "segoeui.ttf",
 }
-NEW_TEXT_FONT = "Arial"  # font for tables and notes the rectifier adds
+# Font for tables/notes the rectifier adds. PDF base-14 Helvetica (Arial is metric-compatible, so it looks
+# the same) because embedded Arial maps '-' to a soft hyphen on copy/search; Helvetica extracts cleanly.
+NEW_TEXT_FONT = "Helvetica"
+CHECKLIST_MAX = 3        # engineer checklist items kept per comment
 FREE_SPACE_SCALE = 0.25  # px per pt for the whitespace finder
 FREE_SPACE_MARGIN = 60   # pt kept clear of the sheet edge
 

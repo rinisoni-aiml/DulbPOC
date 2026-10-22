@@ -13,7 +13,7 @@ from collections import Counter
 import numpy as np
 import pymupdf
 
-from .. import config
+from ..core import config
 
 
 def open_clean(path):

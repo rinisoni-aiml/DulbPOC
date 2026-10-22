@@ -8,10 +8,10 @@ commented.pdf ─▶ extract ─▶ plan (Claude or rules) ─▶ apply (PyMuPDF
 
 | Stage | What it does | LLM? |
 |---|---|---|
-| `stages/extract.py` | Reads the consultant markups straight from the PDF **annotations**: exact text, box, leader tips, fan-out leaders and outlined targets. No OCR. Also collects the drawing words at each tip, a crop image, the legend and a sheet text digest. | no |
-| `stages/plan.py` | Turns each comment into ops from a fixed set (`replace_text`, `swap_symbol`, `add_conduit_fill_table`, `add_note`) plus checklist items. Uses Claude with strict JSON output; `--planner rules` is a keyword baseline that needs no key. | yes / no |
-| `stages/apply.py` | Runs the ops on the vector layer. Text edits remove only the glyphs and re-insert text in the same font, size and direction. Symbol swaps redraw the legend's own vector symbol. Tables are computed in code and placed in free space. An op that can't be placed safely is reported, never guessed. | no |
-| `stages/report.py` | Writes the clean PDF, a highlighted PDF, before/after PNGs, an overview, an integrity check, `report.html` and `checklist.md`. | no |
+| `pipeline/extract.py` | Reads the consultant markups straight from the PDF **annotations**: exact text, box, leader tips, fan-out leaders and outlined targets. No OCR. Also collects the drawing words at each tip, a crop image, the legend and a sheet text digest. | no |
+| `pipeline/plan.py` | Turns each comment into ops from a fixed set (`replace_text`, `swap_symbol`, `add_conduit_fill_table`, `add_note`) plus checklist items. Uses Claude with strict JSON output; `--planner rules` is a keyword baseline that needs no key. | yes / no |
+| `pipeline/apply.py` | Runs the ops on the vector layer. Text edits remove only the glyphs and re-insert text in the same font, size and direction. Symbol swaps redraw the legend's own vector symbol. Tables are computed in code and placed in free space. An op that can't be placed safely is reported, never guessed. | no |
+| `pipeline/report.py` | Writes the clean PDF, a highlighted PDF, before/after PNGs, an overview, an integrity check, `report.html` and `checklist.md`. | no |
 
 ## Setup (Windows, Python 3.11+)
 
@@ -27,26 +27,59 @@ copy .env.example .env   # then set ANTHROPIC_API_KEY (leave blank to use the ru
 
 ```
 rectify-poc/
-├── pyproject.toml            # package metadata, dependencies, `rectify` command, pytest config
-├── requirements.txt          # same runtime deps, for a plain pip install
-├── .env.example              # copy to .env; API key + planner model
+├── pyproject.toml                # package metadata, dependencies, `rectify` command, pytest config
+├── requirements.txt              # runtime + web app deps (used by Streamlit Community Cloud)
+├── .env.example                  # copy to .env; API key + planner model
+├── .streamlit/config.toml        # web app theme and upload limit
 ├── config/
-│   └── inputs.example.json   # engineer inputs (backbox size, conduit spec, ...)
-├── src/rectify/
-│   ├── cli.py                # command line: run | extract | plan | apply
-│   ├── config.py             # every threshold, model name, price, path
-│   ├── stages/               # the pipeline, one module per stage
-│   │   ├── extract.py        # 1. read markups (PDF annotations) + drawing context
-│   │   ├── plan.py           # 2. comment -> ops + checklist (Claude or rules)
-│   │   ├── apply.py          # 3. vector edits with PyMuPDF
-│   │   └── report.py         # 4. highlighted PDF, before/after, HTML, checklist
-│   ├── pdf/geometry.py       # rotation-aware geometry, text lines, fonts, free space
-│   └── engineering/conduit.py# deterministic conduit-fill calculation
-├── tests/                    # pytest, offline (uses ../drawings sample if present)
-└── out/                      # run outputs (git-ignored)
+│   └── inputs.example.json       # engineer inputs (backbox size, conduit spec, ...)
+├── samples/                      # sample commented drawing + its human revision
+├── app/                          # frontend: Streamlit web app
+│   ├── streamlit_app.py          # entry point and page navigation
+│   ├── bootstrap.py              # src/ on sys.path, secrets -> env, database init
+│   ├── views/                    # pages: new_run, history, about
+│   └── components/               # theme and the shared results view
+├── src/rectify/                  # backend package
+│   ├── cli.py                    # command line: run | extract | plan | apply | verify
+│   ├── core/config.py            # every threshold, model name, price, path
+│   ├── pipeline/                 # the pipeline, one module per stage
+│   │   ├── extract.py            # 1. read markups (PDF annotations) + drawing context
+│   │   ├── plan.py               # 2. comment -> ops + checklist (Claude or rules)
+│   │   ├── apply.py              # 3. vector edits with PyMuPDF
+│   │   ├── report.py             # 4. highlighted PDF, before/after, HTML, checklist
+│   │   └── verify.py             # 5. compare with original + human revision (no API)
+│   ├── services/rectification.py # runs the stages; shared by the CLI and the web app
+│   ├── db/                       # SQLite run history (database.py, runs.py)
+│   ├── pdf/geometry.py           # rotation-aware geometry, text lines, fonts, free space
+│   └── domain/conduit.py         # deterministic conduit-fill calculation
+├── tests/                        # pytest, offline (uses ../drawings or samples/)
+├── data/                         # web app runs + rectify.db (git-ignored)
+└── out/                          # CLI run outputs (git-ignored)
 ```
 
-The project root is the nearest folder above the current directory that holds `pyproject.toml`. `.env` and `out/` live there. Set `RECTIFY_HOME` to override.
+The project root is the nearest folder above the current directory that holds `pyproject.toml`. `.env`, `out/` and `data/` live there. Set `RECTIFY_HOME` (and `RECTIFY_DATA_DIR` for the web app storage) to override.
+
+## Web app
+
+```powershell
+.venv\Scripts\python -m streamlit run app/streamlit_app.py
+```
+
+Opens on http://localhost:8501. There is no login. Pages:
+
+- **New run**: upload a commented PDF (or use the bundled sample), choose the planner, set the engineer inputs, optionally add a human-revised PDF to verify against, and run. Results show the KPIs, the sheet overview, every comment with its before/after images, the engineer checklist, the verification (if requested) and downloads for the corrected PDFs, reports, JSON and a ZIP of everything.
+- **Run history**: every run is stored in SQLite (`data/rectify.db`) with its files in `data/runs/<run id>/`. Select a run to open it again or delete it.
+- **About**: the process, outputs and known limits.
+
+The rules planner is the default because it costs nothing. The Claude planner appears when an API key is configured.
+
+### Deploy free on Streamlit Community Cloud
+
+1. Push this folder to a GitHub repository (it is the repository root). Keep the repository private: `samples/` holds client drawings.
+2. On share.streamlit.io choose **Create app**, select the repository and branch, and set **Main file path** to `app/streamlit_app.py`. Python 3.11 or later.
+3. Optional: under **Advanced settings > Secrets**, add `ANTHROPIC_API_KEY = "..."` to enable the Claude planner. Anyone with the app link can then spend API credit, so leave it out for an open demo.
+
+On the free host the file system is temporary: run history and outputs are cleared when the app restarts or redeploys. Windows fonts are not installed on Linux, so text edits fall back to Helvetica there.
 
 ## Run
 
@@ -64,6 +97,18 @@ Outputs go to `out/<pdf name>/`:
 - `checklist.md`, `changes.json`, `plan.json`, `comments.json`
 
 The stages also run one at a time: `extract`, `plan`, `apply`. For example, an engineer can edit `plan.json` by hand and re-run `apply` alone.
+
+### Verify against a human revision (no API)
+
+```powershell
+.venv\Scripts\python -m rectify verify "..\drawings\<commented>.pdf" --revised "..\drawings\<human revision>.pdf"
+```
+
+This writes `verification_report.html` and `verification/`, and checks four things:
+- **File integrity:** pages, markups removed, no original text lost, nothing changed outside the edits.
+- **Per-comment verdict:** Fixed, Partially fixed or Not fixed.
+- **Three-way comparison** of each comment's spot: original vs corrected vs human revision. The revision is aligned per region, because revisions move the plan, legend and tables by different amounts.
+- **Content checks:** new text and table numbers compared with the revision.
 
 ### Engineer inputs (`--inputs`)
 

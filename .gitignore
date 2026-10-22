@@ -1,6 +1,11 @@
 .venv/
 .env
 out/
+data/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.streamlit/secrets.toml
+# client drawings: never commit
+samples/*.pdf
+*.pdf

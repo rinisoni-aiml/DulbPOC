@@ -4,9 +4,9 @@ import json
 import pymupdf
 import pytest
 
-from rectify.stages.apply import Rectifier
-from rectify.stages.extract import extract
-from rectify.stages.plan import plan
+from rectify.pipeline.apply import Rectifier
+from rectify.pipeline.extract import extract
+from rectify.pipeline.plan import plan
 
 
 @pytest.fixture(scope="module")

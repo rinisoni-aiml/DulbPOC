@@ -10,8 +10,8 @@ import textwrap
 
 import pymupdf
 
-from .. import config
-from ..engineering.conduit import conduit_fill, find_cable_table
+from ..core import config
+from ..domain.conduit import conduit_fill, find_cable_table
 from ..pdf.geometry import (FreeSpace, dir_to_rotate, font_by_family, int_to_rgb, open_clean, rect_list,
                      span_font, text_length, text_lines, to_pdf, to_vis, upright_rotate)
 
@@ -118,6 +118,9 @@ class Rectifier:
             avail = max(_dot(p, d) for p in corners) - start
             point = origin + pymupdf.Point(d) * (start - _dot(origin, d))
             fontname, fontfile = span_font(span)
+            if fontfile and "-" in repl:
+                # Embedded TTFs map '-' to a soft hyphen on extraction; keep the text searchable.
+                fontname, fontfile = font_by_family(config.NEW_TEXT_FONT)
             size = span["size"]
             new_len = text_length(repl, fontname, fontfile, size)
             if new_len > avail * config.FIT_SLACK:
@@ -136,12 +139,12 @@ class Rectifier:
                                   text=pymupdf.PDF_REDACT_TEXT_REMOVE)
             page.insert_text(point, repl, fontsize=size, fontname=fontname, fontfile=fontfile,
                              color=int_to_rgb(span["color"]), rotate=dir_to_rotate(d))
-            end = point + pymupdf.Point(d) * new_len
+            end = point + pymupdf.Point(d) * new_len * 1.06  # small margin for metric differences
             bbox = pymupdf.Rect(hit) | pymupdf.Rect(point, end).normalize()
-            # Size the change box from the text actually on the page now (font metrics can differ).
-            for r in page.search_for(repl, clip=bbox + (-40, -40, 40, 40)):
-                if r.intersects(bbox):
-                    bbox |= r
+            # Size the change box from the text line actually on the page now.
+            for l in text_lines(page):
+                if repl in l["text"] and l["pdf"].intersects(bbox + (-2, -2, 2, 2)):
+                    bbox |= l["pdf"]
             self._record(c, op, page, bbox, f"Text '{find}' -> '{repl}'", before=find, after=repl)
 
     # ---- swap_symbol -------------------------------------------------------------------
