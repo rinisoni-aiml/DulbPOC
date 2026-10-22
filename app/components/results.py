@@ -10,7 +10,9 @@ import streamlit as st
 
 from components.theme import badge, clean
 from rectify.db import runs
+from rectify.pipeline.report import RESOLUTION_LABEL
 
+RESOLUTION_KIND = {"resolved": "ok", "partially_resolved": "warn", "ready_to_fix": "warn", "needs_engineer": "muted"}
 STATUS = {"auto": ("Applied", "ok"), "partial": ("Partially applied", "warn"), "engineer": ("Engineer action", "muted")}
 VERDICT = {"Fixed": "ok", "Partially fixed": "warn", "Not fixed": "fail"}
 REVIEW = {"Pending": None, "Approve": "approved", "Reject": "rejected"}
@@ -99,12 +101,22 @@ def _summary(d, ex, plan, chg, run, key):
     by_comment = {}
     for ch in chg["changes"]:
         by_comment.setdefault(ch["comment_id"], []).append(ch)
+    resolution = {r["comment_id"]: r for r in chg.get("resolution", [])}
+    if resolution:
+        st.subheader("Comment resolution")
+        cols = st.columns(len(RESOLUTION_LABEL))
+        for col, (k, label) in zip(cols, RESOLUTION_LABEL.items()):
+            col.metric(label, sum(1 for r in resolution.values() if r["status"] == k))
     decisions = runs.get_decisions(run["id"])
     _review_panel(run, chg["changes"], decisions, key)
     st.subheader("Comments")
     for c in ex["comments"]:
         p = status.get(c["id"], {})
-        label, kind = STATUS.get(p.get("status", "engineer"), STATUS["engineer"])
+        res = resolution.get(c["id"])
+        if res:
+            label, kind = RESOLUTION_LABEL.get(res["status"], res["status"]), RESOLUTION_KIND.get(res["status"], "muted")
+        else:
+            label, kind = STATUS.get(p.get("status", "engineer"), STATUS["engineer"])
         with st.container(border=True):
             st.markdown(f"**{c['id']}** &nbsp; {badge(label, kind)}"
                         + (badge(clean(p['scope']).replace('_', ' ')) if p.get("scope") else ""),
@@ -124,15 +136,40 @@ def _summary(d, ex, plan, chg, run, key):
                                 unsafe_allow_html=True)
             for f in chg["failures"]:
                 if f["comment_id"] == c["id"]:
-                    st.warning(f"Not applied ({clean(f['op'])}): {clean(f['reason'])}")
+                    needs = "; ".join(clean(n) for n in f.get("inputs_needed") or [])
+                    if f.get("kind") == "input":
+                        st.info(f"Waiting for input ({clean(f['op'])}): {clean(f['reason'])}"
+                                + (f". Needed: {needs}" if needs else ""))
+                    else:
+                        st.warning(f"Not applied ({clean(f['op'])}): {clean(f['reason'])}")
             if p.get("checklist"):
                 st.markdown("**For the engineer:**\n" + "\n".join(
                     f"- {clean(k['item'])} *(needs: {clean(', '.join(k['inputs_needed']))})*" for k in p["checklist"]))
+    _missing_elevations(chg.get("missing_elevations", []))
     others = ex.get("other_markups", [])
     if others:
         st.subheader("Other markups (not comments)")
         st.dataframe(pd.DataFrame([{"Kind": o["kind"], "Text": clean(o["text"]) or "-", "Author": o.get("author", "")}
                                    for o in others]), hide_index=True, width="stretch")
+
+
+def _missing_elevations(items):
+    if not items:
+        return
+    added = sum(1 for m in items if m.get("added"))
+    st.subheader("Devices without an elevation label")
+    st.caption(f"{len(items)} device(s) have no H=...mm label; {added} label(s) were added from the inputs. "
+               "The rest are marked orange in the highlighted drawing. Enter a mounting height per device type "
+               "under Device elevations on the New run page and run again to add them.")
+    by_type = {}
+    for m in items:
+        t = by_type.setdefault(m["type"], {"Device type": m["type"], "Devices": 0, "Labels added": 0, "Tags": []})
+        t["Devices"] += 1
+        t["Labels added"] += bool(m.get("added"))
+        t["Tags"].append(m["tag"])
+    st.dataframe(pd.DataFrame([{**t, "Tags": ", ".join(t["Tags"])} for t in by_type.values()]),
+                 hide_index=True, width="stretch",
+                 column_config={"Tags": st.column_config.TextColumn(width="large")})
 
 
 def _drawing(d, key):
@@ -155,8 +192,10 @@ def _checklist(plan, chg):
             rows.append({"Comment": p["comment_id"], "Action": clean(k["item"]),
                          "Inputs needed": clean(", ".join(k["inputs_needed"])), "Where": clean(k["where_on_sheet"])})
     for f in chg["failures"]:
-        rows.append({"Comment": f["comment_id"], "Action": clean(f"Could not auto-apply {f['op']}: {f['reason']}"),
-                     "Inputs needed": "Drafter to apply manually", "Where": "See comment"})
+        verb = "Waiting for input" if f.get("kind") == "input" else "Could not auto-apply"
+        rows.append({"Comment": f["comment_id"], "Action": clean(f"{verb} ({f['op']}): {f['reason']}"),
+                     "Inputs needed": clean(", ".join(f.get("inputs_needed") or ["Drafter to apply manually"])),
+                     "Where": "See comment"})
     if not rows:
         st.success("No open items for the engineer.")
         return

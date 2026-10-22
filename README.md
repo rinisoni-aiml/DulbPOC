@@ -67,7 +67,7 @@ The project root is the nearest folder above the current directory that holds `p
 
 Opens on http://localhost:8501. There is no login. Pages:
 
-- **New run**: upload a commented PDF (or use the bundled sample), choose the planner, set the engineer inputs, optionally add a human-revised PDF to verify against, and run. Results show the KPIs, the sheet overview, every comment with its before/after images, the engineer checklist, the verification (if requested) and downloads for the corrected PDFs, reports, JSON and a ZIP of everything.
+- **New run**: upload a commented PDF (or use the local sample), choose the planner, set the engineer inputs (back box size, conduit spec, device elevations per type), optionally add the architectural reference drawing (restores space IDs) and a human-revised PDF to verify against, and run. Results show the KPIs, the comment resolution (resolved, partially resolved, ready to fix, needs engineer), the sheet overview, every comment with its before/after images and any inputs it is waiting for, devices without an elevation label, the engineer checklist, the verification (if requested) and downloads for the corrected PDFs, reports, JSON and a ZIP of everything.
 - **Change review**: each applied change (CH-xx) can be approved or rejected, with an optional reviewer note, or all pending changes approved at once. Decisions are saved immediately in SQLite and written to `approvals.json` in the run folder, which is included in the downloads.
 - **Run history**: every run is stored in SQLite (`data/rectify.db`) with its files in `data/runs/<run id>/`. Select a run to open it again or delete it.
 - **About**: the process, outputs and known limits.

@@ -1,9 +1,11 @@
 """New run: upload a commented drawing, set the engineer inputs, run the pipeline, show the results."""
 import json
+import math
 import re
 import shutil
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from components.results import render_run
@@ -52,6 +54,33 @@ def _pick_pdf(label, sample, key, help_text):
     return sample
 
 
+def _cell(v):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    return str(v).strip()
+
+
+def _elevations(defaults):
+    st.markdown("**Device elevations**")
+    st.caption("Mounting height per device type, for example from the RFI response. Devices of these types "
+               "without an H=...mm label get one added; all others are listed for the engineer.")
+    table = st.data_editor(
+        pd.DataFrame([{"Device type": k, "Height (mm)": str(v)} for k, v in defaults.items()],
+                     columns=["Device type", "Height (mm)"], dtype="object"),
+        num_rows="dynamic", hide_index=True, width="stretch", key="elevations",
+        column_config={"Device type": st.column_config.TextColumn(help="Type code as on the drawing, e.g. PIR"),
+                       "Height (mm)": st.column_config.TextColumn(help="Mounting height in mm, e.g. 2400")})
+    out = {}
+    for _, row in table.iterrows():
+        kind, height = _cell(row.get("Device type")), _cell(row.get("Height (mm)"))
+        if not kind and not height:
+            continue
+        if not kind or not re.fullmatch(r"\d+(\s*mm)?", height, re.IGNORECASE):
+            return None, f"Device elevations: enter a device type and a height in mm (row '{kind or height}')."
+        out[kind] = re.sub(r"\D", "", height)
+    return out, None
+
+
 def _inputs_form():
     d = _default_inputs()
     conduit = {**config.CONDUIT, **d.get("conduit", {})}
@@ -74,13 +103,16 @@ def _inputs_form():
         inputs["cable_qty"] = json.loads(qty or "{}")
     except ValueError as e:
         return None, f"Advanced inputs are not valid JSON: {e}"
-    return inputs, None
+    inputs["elevations"], error = _elevations(d.get("elevations") or {})
+    return (None, error) if error else (inputs, None)
 
 
-def _run(source, revised, planner, inputs):
+def _run(source, revised, reference, planner, inputs):
     run_id = runs.new_run_id()
     run_dir = config.RUNS_DIR / run_id
     pdf = _save(source, run_dir / "source")
+    if reference is not None:
+        inputs = {**inputs, "reference_pdf": str(_save(reference, run_dir / "reference"))}
     runs.create_run(run_id, pdf.name, planner, inputs, run_dir)
     with st.status("Processing drawing", expanded=True) as status:
         order = list(STAGES)
@@ -127,6 +159,11 @@ def render():
         st.divider()
         inputs, error = _inputs_form()
         st.divider()
+        reference = None
+        if st.toggle("Add an architectural reference drawing",
+                     help="The architectural background that shows the room names and space IDs. They are "
+                          "copied onto the sheet for comments that ask to restore space IDs."):
+            reference = st.file_uploader("Architectural reference drawing (PDF)", type=["pdf"], key="ref-file")
         revised = None
         if st.toggle("Also verify against a human-revised drawing",
                      help="Compares the corrected drawing with a revision made by a drafter. No API cost."):
@@ -136,7 +173,7 @@ def render():
             st.error(error)
 
     if start:
-        run_id = _run(source, revised, planner, inputs)
+        run_id = _run(source, revised, reference, planner, inputs)
         if run_id:
             st.session_state["current_run"] = run_id
 
