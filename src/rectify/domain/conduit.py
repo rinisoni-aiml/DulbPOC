@@ -1,12 +1,14 @@
 """Deterministic conduit-fill calculation. Numbers never come from the LLM."""
 import math
 import re
+from collections import Counter
 
 import pymupdf
 
 from ..core import config
 
 NUM = re.compile(r"^\d+(\.\d+)?$")
+CONDUIT_SIZE = re.compile(config.CONDUIT_SIZE_RE, re.I)
 
 
 def _size(line):
@@ -84,12 +86,30 @@ def conduit_fill(cables, conduit=None, quantities=None, overrides=None):
     return rows, base
 
 
-def assumptions(base, overrides=None, quantities=None, standard=None):
+def sheet_conduit(lines):
+    """Conduit size the sheet itself specifies (most frequent "25mmØ" / "Ø25MM" in notes, legend, details).
+
+    Returns (spec or None, source text). Only sizes with a known internal area are used, so the
+    table always matches what the drawing says; anything else falls back to config.CONDUIT.
+    """
+    sizes = Counter()
+    for l in lines:
+        for m in CONDUIT_SIZE.finditer(l["text"]):
+            sizes[int(m.group(1) or m.group(2))] += 1
+    for size, n in sizes.most_common():
+        if size in config.CONDUIT_AREAS:
+            return ({"size_mm": size, "area_mm2": config.CONDUIT_AREAS[size]},
+                    f"as specified on this sheet ({size}mm conduits in notes / legend, {n} mentions)")
+    return None, "default (no conduit size found on the sheet)"
+
+
+def assumptions(base, overrides=None, quantities=None, standard=None, source=None):
     """Plain-language basis of the calculation, printed under the table."""
     lines = [
         "Fill % = total cable cross-section / conduit internal area. Spare % = max fill - Fill %.",
         f"Cable outer diameters: 'Assumed' values from the Cable Type table on this sheet. "
-        f"Conduit: {base['size_mm']:g} mm, internal area {base['area_mm2']:g} mm2.",
+        f"Conduit: {base['size_mm']:g} mm, internal area {base['area_mm2']:g} mm2"
+        + (f", {source}." if source else "."),
         f"Max fill {base['max_fill_pct']:g}%: {standard or config.CONDUIT_STANDARD}.",
     ]
     if overrides:

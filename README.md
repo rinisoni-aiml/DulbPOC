@@ -129,6 +129,13 @@ These are facts the drawing doesn't contain. They get applied instead of guessed
 - `elevations`: mounting height per device type, for example from the RFI response. Devices without an `H=…mm` label are always listed and marked orange in `corrected_highlighted.pdf`. The label is drawn only for types given here.
 - `reference_pdf` (or `--reference`): the architectural drawing that shows the space IDs. Its room names and IDs are copied onto the sheet at the aligned positions. If it's missing, the "restore space IDs" comment is reported as **ready to fix**, with that drawing named as the input needed.
 - `reference_offset` (optional): `[dx, dy]` in points, used when the reference can't be aligned automatically.
+- `conduit` (optional): if it's left out, the conduit fill table uses the conduit size the sheet itself states (for example 25 mm in its notes and legend), so the table matches the drawing.
+- `revision` (optional): `{"bump": true, "date": "dd/mm/yy", "description": "..."}`. By default the corrected sheet is issued as the next revision:
+  - a new top row in the revision table
+  - the title block's revision number and date updated
+  - APRV / CHK'D left blank for signatures
+
+In `corrected_highlighted.pdf`, every consultant comment is shown again at its original position, with its response: status, what was done, and the inputs still needed.
 
 Every comment ends with one status in `report.html` and `changes.json` (`resolution`):
 - **resolved**: fixed on the drawing

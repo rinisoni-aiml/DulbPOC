@@ -9,12 +9,14 @@ import json
 import re
 import statistics
 import textwrap
+from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pymupdf
 
 from ..core import config
-from ..domain.conduit import assumptions, conduit_fill, find_cable_table
+from ..domain.conduit import assumptions, conduit_fill, find_cable_table, sheet_conduit
 from ..domain.elevations import missing_elevations
 from ..domain.space_ids import space_labels
 from ..pdf.align import Aligner
@@ -22,6 +24,8 @@ from ..pdf.geometry import (FreeSpace, dir_to_rotate, font_by_family, int_to_rgb
                      span_font, text_length, text_lines, to_pdf, to_vis, upright_rotate)
 
 TEXT_KEEP = getattr(pymupdf, "PDF_REDACT_TEXT_NONE", 1)
+DATE = re.compile(r"^\d{2}/\d{2}/\d{2}(\d{2})?$")
+DATE_OR_REV = re.compile(r"^(\d{1,2}|[A-Z])$")  # revision ids in the REV column: 00, 01, ... or A, B, ...
 
 
 def _dot(p, d):
@@ -90,11 +94,13 @@ class Rectifier:
         for r in items or [pdf_rect]:
             self._free_space(page.number).occupy(to_vis(page, r) + (-6, -6, 6, 6))
 
-    def _fail(self, c, op, why, needs=None, kind="drafter"):
+    def _fail(self, c, op, why, needs=None, kind="drafter", input_keys=None, suggestions=None):
         """An op that could not be applied. kind: "input" = applies automatically once `needs` are
-        supplied; "engineer" = needs a decision; "drafter" = must be drawn by hand."""
+        supplied (`input_keys` name the inputs.json / app fields, `suggestions` are hints only);
+        "engineer" = needs a decision; "drafter" = must be drawn by hand."""
         self.failures.append({"comment_id": c["id"], "op": op["type"], "reason": why, "op_detail": op,
-                              "kind": kind, "inputs_needed": needs or ["drafter to apply manually"]})
+                              "kind": kind, "inputs_needed": needs or ["drafter to apply manually"],
+                              "input_keys": input_keys or [], "suggestions": suggestions or {}})
 
     def _skip(self, c, op, why):
         """Op already satisfied by another comment's edit: not a failure, nothing to draw."""
@@ -126,42 +132,47 @@ class Rectifier:
             return self._fail(c, op, f"text '{find}' not found ({where})")
 
         for hit, line in targets:
-            d = line["dir"]
-            span = next((s for s in line["spans"] if pymupdf.Rect(s["bbox"]).intersects(hit)), line["spans"][0])
-            origin = pymupdf.Point(span["origin"])
-            corners = [hit.tl, hit.tr, hit.bl, hit.br]
-            start = min(_dot(p, d) for p in corners)
-            avail = max(_dot(p, d) for p in corners) - start
-            point = origin + pymupdf.Point(d) * (start - _dot(origin, d))
-            fontname, fontfile = span_font(span)
-            if fontfile and "-" in repl:
-                # Embedded TTFs map '-' to a soft hyphen on extraction; keep the text searchable.
-                fontname, fontfile = font_by_family(config.NEW_TEXT_FONT)
-            size = span["size"]
-            new_len = text_length(repl, fontname, fontfile, size)
-            if new_len > avail * config.FIT_SLACK:
-                size *= max(config.MIN_FONT_SCALE, avail * config.FIT_SLACK / new_len)
-                new_len = text_length(repl, fontname, fontfile, size)
-            if line["vis"].width < 80 and abs(line["vis"].width - to_vis(page, hit).width) < 2:
-                point += pymupdf.Point(d) * ((avail - new_len) / 2)  # short centred caption: keep centred
-
-            # Glyph-only redaction, shrunk across the baseline so neighbouring lines are untouched.
-            thick = (pymupdf.Rect(hit).width if abs(d[1]) > abs(d[0]) else pymupdf.Rect(hit).height)
-            shrink = thick * 0.15
-            red = (hit + (shrink, 0, -shrink, 0)) if abs(d[1]) > abs(d[0]) else (hit + (0, shrink, 0, -shrink))
-            page.add_redact_annot(red)
-            page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
-                                  graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-                                  text=pymupdf.PDF_REDACT_TEXT_REMOVE)
-            page.insert_text(point, repl, fontsize=size, fontname=fontname, fontfile=fontfile,
-                             color=int_to_rgb(span["color"]), rotate=dir_to_rotate(d))
-            end = point + pymupdf.Point(d) * new_len * 1.06  # small margin for metric differences
-            bbox = pymupdf.Rect(hit) | pymupdf.Rect(point, end).normalize()
-            # Size the change box from the text line actually on the page now.
-            for l in text_lines(page):
-                if repl in l["text"] and l["pdf"].intersects(bbox + (-2, -2, 2, 2)):
-                    bbox |= l["pdf"]
+            bbox = self._rewrite(page, hit, line, repl)
             self._record(c, op, page, bbox, f"Text '{find}' -> '{repl}'", before=find, after=repl)
+
+    def _rewrite(self, page, hit, line, repl):
+        """Replace the glyphs inside `hit` (part of `line`) with `repl` in the same style; returns the pdf bbox."""
+        d = line["dir"]
+        span = next((s for s in line["spans"] if pymupdf.Rect(s["bbox"]).intersects(hit)), line["spans"][0])
+        origin = pymupdf.Point(span["origin"])
+        corners = [hit.tl, hit.tr, hit.bl, hit.br]
+        start = min(_dot(p, d) for p in corners)
+        avail = max(_dot(p, d) for p in corners) - start
+        point = origin + pymupdf.Point(d) * (start - _dot(origin, d))
+        fontname, fontfile = span_font(span)
+        if fontfile and "-" in repl:
+            # Embedded TTFs map '-' to a soft hyphen on extraction; keep the text searchable.
+            fontname, fontfile = font_by_family(config.NEW_TEXT_FONT)
+        size = span["size"]
+        new_len = text_length(repl, fontname, fontfile, size)
+        if new_len > avail * config.FIT_SLACK:
+            size *= max(config.MIN_FONT_SCALE, avail * config.FIT_SLACK / new_len)
+            new_len = text_length(repl, fontname, fontfile, size)
+        if line["vis"].width < 80 and abs(line["vis"].width - to_vis(page, hit).width) < 2:
+            point += pymupdf.Point(d) * ((avail - new_len) / 2)  # short centred caption: keep centred
+
+        # Glyph-only redaction, shrunk across the baseline so neighbouring lines are untouched.
+        thick = (pymupdf.Rect(hit).width if abs(d[1]) > abs(d[0]) else pymupdf.Rect(hit).height)
+        shrink = thick * 0.15
+        red = (hit + (shrink, 0, -shrink, 0)) if abs(d[1]) > abs(d[0]) else (hit + (0, shrink, 0, -shrink))
+        page.add_redact_annot(red)
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                              graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                              text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+        page.insert_text(point, repl, fontsize=size, fontname=fontname, fontfile=fontfile,
+                         color=int_to_rgb(span["color"]), rotate=dir_to_rotate(d))
+        end = point + pymupdf.Point(d) * new_len * 1.06  # small margin for metric differences
+        bbox = pymupdf.Rect(hit) | pymupdf.Rect(point, end).normalize()
+        # Size the change box from the text line actually on the page now.
+        for l in text_lines(page):
+            if repl in l["text"] and l["pdf"].intersects(bbox + (-2, -2, 2, 2)):
+                bbox |= l["pdf"]
+        return bbox
 
     # ---- swap_symbol -------------------------------------------------------------------
     def _legend_symbol(self, pno, label):
@@ -291,7 +302,10 @@ class Rectifier:
         table_rect, cables = find_cable_table(page, text_lines(page))
         if not cables:
             return self._fail(c, op, "no 'Cable Type' table with outer diameters found on the sheet")
-        rows, conduit = conduit_fill(cables, self.inputs.get("conduit"), self.inputs.get("cable_qty"),
+        spec, source = self.inputs.get("conduit"), "engineer inputs"
+        if not spec:
+            spec, source = sheet_conduit(text_lines(page))
+        rows, conduit = conduit_fill(cables, spec, self.inputs.get("cable_qty"),
                                      self.inputs.get("conduit_overrides"))
         cols = list(rows[0].keys())
         fs, pad = 9.0, 4.0
@@ -301,7 +315,7 @@ class Rectifier:
                       + [text_length(r[col], fontname, fontfile, fs) for r in rows]) + 2 * pad
                   for i, col in enumerate(cols)]
         notes = assumptions(conduit, self.inputs.get("conduit_overrides"), self.inputs.get("cable_qty"),
-                            self.inputs.get("conduit_standard"))
+                            self.inputs.get("conduit_standard"), source)
         row_h = fs * 1.9
         head_h = fs * 1.25 * max(len(h) for h in head) + 2 * pad
         title_h, foot_h = fs * 2.2, fs * (1.6 + 1.2 * len(notes))
@@ -419,10 +433,16 @@ class Rectifier:
                          + ", ".join(f"{t['tag']} {txt}" for t, _, txt in added), after=None, items=boxes)
         if open_:
             types = sorted({t["type"] for t in open_})
+            seen = {}
+            for t in tags:  # heights already on this sheet for the same device type: hints for the engineer
+                if t.get("elevation"):
+                    seen.setdefault(t["type"], Counter())[re.sub(r"\D", "", t["elevation"])] += 1
+            hints = {k: seen[k].most_common(1)[0][0] for k in types if k in seen}
             self._fail(c, op, f"{len(open_)} of {len(tags)} devices have no elevation label: "
                        + ", ".join(t["tag"] for t in open_),
                        needs=[f"mounting height for device type(s) {', '.join(types)} "
-                              "(inputs.json: elevations, e.g. from the RFI response)"], kind="input")
+                              "(inputs.json: elevations, e.g. from the RFI response)"], kind="input",
+                       input_keys=["elevations"], suggestions={"elevations": hints} if hints else None)
 
     # ---- space IDs --------------------------------------------------------------------------
     def place_space_ids(self, c, op):
@@ -430,7 +450,7 @@ class Rectifier:
         ref_path = self.inputs.get("reference_pdf")
         need = ["architectural background drawing showing space IDs (inputs.json: reference_pdf, or --reference)"]
         if not ref_path or not Path(ref_path).exists():
-            return self._fail(c, op, "no architectural reference drawing supplied", needs=need, kind="input")
+            return self._fail(c, op, "no architectural reference drawing supplied", needs=need, kind="input", input_keys=["reference_pdf"])
         pno = c["page"]
         page = self._page(pno)
         ref, _ = open_clean(ref_path)
@@ -438,12 +458,13 @@ class Rectifier:
         labels = space_labels(text_lines(rp))
         if not labels:
             return self._fail(c, op, f"no space IDs matching {config.SPACE_ID_RE} in {Path(ref_path).name}",
-                              needs=need, kind="input")
+                              needs=need, kind="input", input_keys=["reference_pdf"])
         manual = self.inputs.get("reference_offset")  # [dx, dy] vis pt, reference -> this sheet
         aligner = None if manual else Aligner(rp, page)
         if aligner is not None and not aligner.clusters:
             return self._fail(c, op, "could not align the reference drawing with this sheet",
-                              needs=["reference_offset [dx, dy] in inputs.json"], kind="input")
+                              needs=["reference_offset [dx, dy] in inputs.json"], kind="input",
+                              input_keys=["reference_offset"])
         existing = {l["text"].strip() for l in text_lines(page)}
         boxes, placed = [], []
         for lab in labels:
@@ -470,6 +491,81 @@ class Rectifier:
         self._record(c, op, page, union, f"Placed {len(placed)} space IDs from {Path(ref_path).name}",
                      after=json.dumps(placed), items=boxes)
 
+    # ---- revision ----------------------------------------------------------------------------
+    @staticmethod
+    def _date_like(sample, given=None):
+        """Today (or `given`, dd/mm/yy[yy]) in the same dd/mm/yy or dd/mm/yyyy format as `sample`."""
+        long = len(sample.strip().split("/")[-1]) == 4
+        if given:
+            d, m, y = given.strip().split("/")
+            y = y if len(y) == 4 else "20" + y
+        else:
+            t = date.today()
+            d, m, y = f"{t.day:02d}", f"{t.month:02d}", str(t.year)
+        return f"{d}/{m}/{y if long else y[-2:]}"
+
+    def bump_revision(self):
+        """Issue the corrected sheet as the next revision: new top row in the revision table, title-block
+        revision number and issue date updated. Approval / check columns are left blank for signatures."""
+        opts = {"bump": config.REVISION_BUMP, **(self.inputs.get("revision") or {})}
+        if not opts.get("bump") or not self.changes:
+            return
+        c, op = {"id": "REV", "page": 0, "tips": []}, {"type": "bump_revision"}
+        page = self._page(0)
+        lines = text_lines(page)
+        same_row = lambda a, b: abs(a["vis"].y0 - b["vis"].y0) < 2.5  # noqa: E731
+        header = next((l for l in lines if l["text"].strip().upper() == "REV"
+                       and any(o["text"].strip().upper() == "DESCRIPTION" and same_row(o, l) for o in lines)), None)
+        if header is None:
+            return self._fail(c, op, "revision table not found; update the revision by hand")
+        hv = header["vis"]
+        heads = [o for o in lines if same_row(o, header) and o["vis"].x0 >= hv.x0 - 5]
+        right = max(o["vis"].x1 for o in heads) + 10
+        rows = sorted((l for l in lines if DATE_OR_REV.match(l["text"].strip()) and abs(l["vis"].x0 - hv.x0) < 8
+                       and l["vis"].y1 <= hv.y0 and hv.y0 - l["vis"].y1 < 200), key=lambda l: l["vis"].y0)
+        if not rows:
+            return self._fail(c, op, "no revision rows found in the revision table")
+        latest = rows[0]  # rows stack upwards: the top one is the newest
+        pitch = rows[1]["vis"].y0 - latest["vis"].y0 if len(rows) > 1 else latest["vis"].height * 1.4
+        cells = [l for l in lines if same_row(l, latest) and hv.x0 - 5 <= l["vis"].x0 <= right]
+        slot = pymupdf.Rect(hv.x0 - 3, latest["vis"].y0 - pitch, right, latest["vis"].y0 - 1)
+        if any(l["vis"].intersects(slot) for l in lines):
+            return self._fail(c, op, "no empty row above the latest revision; update the revision by hand")
+        old = latest["text"].strip()
+        new = str(int(old) + 1).zfill(len(old)) if old.isdigit() else chr(ord(old) + 1)
+        boxes, new_date = [], None
+        for cell in cells:
+            col = min(heads, key=lambda h: abs((h["vis"].x0 + h["vis"].x1) / 2 - (cell["vis"].x0 + cell["vis"].x1) / 2))
+            name = col["text"].strip().upper()
+            if cell is latest:
+                value = new
+            elif name == "DATE":
+                value = new_date = self._date_like(cell["text"], opts.get("date"))
+            elif name == "DESCRIPTION":
+                value = opts.get("description") or cell["text"]
+            else:
+                continue  # approval / checked: left blank for the engineer's initials
+            size = cell["spans"][0]["size"]
+            v = cell["vis"] + (0, -pitch, 0, -pitch)
+            self._draw_text_vis(page, v.x0, v.y1 - size * 0.21, value, size)
+            boxes.append(to_pdf(page, v + (0, 0, max(0, text_length(value, "helv", None, size) - v.width), 0)))
+        # Title block: REVISION NO value and the issue date next to it.
+        label = next((l for l in lines if l["text"].strip().upper() == "REVISION NO"), None)
+        if label is not None:
+            lv = label["vis"]
+            for l in lines:
+                t, v = l["text"].strip(), l["vis"]
+                if t == old and 0 < v.y0 - lv.y1 < 80 and abs(v.x0 - lv.x0) < 80:
+                    boxes.append(self._rewrite(page, l["pdf"], l, new))
+                elif DATE.match(t) and 0 < lv.y0 - v.y0 < 120 and v.x0 >= hv.x0 - 20:
+                    boxes.append(self._rewrite(page, l["pdf"], l, self._date_like(t, opts.get("date"))))
+        union = pymupdf.Rect(boxes[0])
+        for b in boxes[1:]:
+            union |= b
+        self._record(c, op, page, union, f"Issued as revision {new} dated {new_date or 'today'}: new row in the "
+                     "revision table, title block revision number and date updated (APRV / CHK'D left blank "
+                     "for signature)", before=old, after=new, items=boxes)
+
     # ---- driver ----------------------------------------------------------------------------
     def run(self, plan):
         by_id = {c["id"]: c for c in self.ex["comments"]}
@@ -488,6 +584,10 @@ class Rectifier:
                     h(c, op)
                 except Exception as e:  # one bad op must not sink the whole sheet
                     self._fail(c, op, f"{type(e).__name__}: {e}")
+        try:
+            self.bump_revision()
+        except Exception as e:
+            self._fail({"id": "REV"}, {"type": "bump_revision"}, f"{type(e).__name__}: {e}")
         return self.changes, self.failures
 
     def save(self, path):

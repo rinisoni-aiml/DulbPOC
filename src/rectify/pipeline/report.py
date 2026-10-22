@@ -26,7 +26,22 @@ def _rects(ch, key="pdf"):
     return ch.get(f"items_{key}") or [ch[f"bbox_{key}"]]
 
 
-def highlighted_pdf(corrected_pdf, changes, path, findings=()):
+def _response_text(c, r, changes):
+    lines = [f"{c['id']} - {RESOLUTION_LABEL.get(r.get('status'), r.get('status', ''))}",
+             f"Consultant: {c['text']}"]
+    done = [ch for ch in changes if ch["id"] in r.get("edits", [])]
+    if done:
+        lines.append("Done: " + "; ".join(f"{ch['id']} {ch['description']}" for ch in done))
+    if r.get("covered"):
+        lines.append("Covered: " + "; ".join(r["covered"]))
+    if r.get("inputs_needed"):
+        lines.append("Needs input: " + "; ".join(r["inputs_needed"]))
+    if r.get("engineer_actions"):
+        lines.append("Engineer: " + "; ".join(r["engineer_actions"]))
+    return "\n".join(lines)
+
+
+def highlighted_pdf(corrected_pdf, changes, path, findings=(), extracted=None, res=()):
     """Copy of the corrected sheet with toggleable boxes + notes (Acrobat comments):
     red = AI change, orange = finding still open (e.g. device without an elevation label)."""
     doc = pymupdf.open(corrected_pdf)
@@ -49,6 +64,24 @@ def highlighted_pdf(corrected_pdf, changes, path, findings=()):
         a.set_info(title=config.AUTHOR, subject=f"{f['comment_id']} / elevation missing",
                    content=f"{f['comment_id']}: no elevation (H=...mm) label found for {f['tag']}")
         a.update()
+    # Every consultant comment again, at its original box, with the response (status, done, still needed).
+    res_by = {r["comment_id"]: r for r in res}
+    for c in (extracted or {}).get("comments", []):
+        r = res_by.get(c["id"])
+        if r is None:
+            continue
+        page = doc[c["page"]]
+        box = pymupdf.Rect(c["box_pdf"])
+        a = page.add_text_annot(box.tl, _response_text(c, r, changes), icon="Comment")
+        a.set_colors(stroke=config.RESPONSE_RGB.get(r["status"], (0.4, 0.4, 0.4)))
+        a.set_info(title=config.AUTHOR, subject=f"{c['id']} response")
+        a.update()
+        outline = page.add_rect_annot(box)
+        outline.set_colors(stroke=config.RESPONSE_RGB.get(r["status"], (0.4, 0.4, 0.4)))
+        outline.set_border(width=1, dashes=[1, 2])
+        outline.set_info(title=config.AUTHOR, subject=f"{c['id']} consultant comment",
+                         content=_response_text(c, r, changes))
+        outline.update()
     doc.save(str(path), garbage=3, deflate=True)
 
 
@@ -151,6 +184,17 @@ INPUT_HINTS = ("inputs.json", "back box size", "backbox size", "mounting height"
                "architectural reference", "conduit size", "conduit area", "max fill", "cable quantit")
 
 
+# phrase in an "inputs needed" text -> the inputs.json key / app field that supplies it
+INPUT_KEYS = (("backbox", "backbox_size"), ("back box", "backbox_size"), ("mounting height", "elevations"),
+              ("elevation", "elevations"), ("architectural", "reference_pdf"), ("conduit size", "conduit"),
+              ("conduit area", "conduit"), ("max fill", "conduit"), ("cable quantit", "cable_qty"))
+
+
+def _keys_for(texts):
+    keys = [k for t in texts for phrase, k in INPUT_KEYS if phrase in t.lower()]
+    return list(dict.fromkeys(keys))
+
+
 def _input_only(item):
     """A checklist item whose every need is an engineer input: it is ready to fix once that value is given."""
     needs = item.get("inputs_needed") or []
@@ -161,7 +205,8 @@ def resolution(extracted, plan, changes, failures, skipped):
     """Per comment: what was done, what is waiting for named inputs, what needs an engineer.
 
     Item shape: {"comment_id", "status", "edits": [CH ids], "covered": [reasons],
-                 "inputs_needed": [str], "engineer_actions": [str]}
+                 "inputs_needed": [str], "input_keys": [inputs.json keys / app fields],
+                 "suggestions": {input_key: value} (hints only, never applied), "engineer_actions": [str]}
     status: resolved | partially_resolved | ready_to_fix | needs_engineer
     """
     plan_by = {p["comment_id"]: p for p in plan["comments"]}
@@ -180,8 +225,14 @@ def resolution(extracted, plan, changes, failures, skipped):
             status = "partially_resolved" if (inputs or engineer) else "resolved"
         else:
             status = "ready_to_fix" if inputs else "needs_engineer"
+        keys = [k for f in fails if f.get("kind") == "input" for k in f.get("input_keys", [])]
+        keys = list(dict.fromkeys(keys + _keys_for(inputs)))
+        suggestions = {}
+        for f in fails:
+            suggestions.update(f.get("suggestions") or {})
         out.append({"comment_id": cid, "status": status, "edits": edits, "covered": covered,
-                    "inputs_needed": list(dict.fromkeys(inputs)), "engineer_actions": engineer})
+                    "inputs_needed": list(dict.fromkeys(inputs)), "input_keys": keys,
+                    "suggestions": suggestions, "engineer_actions": engineer})
     return out
 
 
@@ -253,6 +304,10 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
         if r.get("inputs_needed"):
             parts.append("<p><b>Will be fixed automatically once these inputs are supplied:</b></p><ul>"
                          + "".join(f"<li>{e(x)}</li>" for x in r["inputs_needed"]) + "</ul>")
+        for key, hint in (r.get("suggestions") or {}).items():
+            hint_txt = ", ".join(f"{k}: {v} mm" for k, v in hint.items()) if isinstance(hint, dict) else str(hint)
+            parts.append(f"<p class='sub'>Hint for <code>{e(key)}</code> (most common value already on this sheet, "
+                         f"confirm before use): {e(hint_txt)}</p>")
         if p.get("intent"):
             parts.append(f"<p><b>Intent:</b> {e(p['intent'])}</p>")
         for ch in by_comment.get(c["id"], []):
@@ -270,6 +325,13 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
                 f"<li>{e(k['item'])} <i>(needs: {e(', '.join(k['inputs_needed']))})</i></li>"
                 for k in p["checklist"]) + "</ul>")
         parts.append("</div>")
+    sheet_level = [ch for ch in changes if ch["comment_id"] not in {c["id"] for c in extracted["comments"]}]
+    if sheet_level:
+        parts.append("<h2>Sheet-level changes</h2>")
+        for ch in sheet_level:
+            parts.append(f"<p><b>{e(ch['id'])}</b>: {e(ch['description'])}</p>")
+            if ch.get("image"):
+                parts.append(f"<img src='{e(ch['image'])}' alt='Before and after {e(ch['id'])}' loading='lazy'>")
     if missing:
         parts.append(f"<h2>Devices without an elevation label ({len(missing)})</h2><p class='sub'>Marked orange in "
                      "corrected_highlighted.pdf. Supply heights per device type in inputs.json (elevations) to add "
@@ -297,10 +359,10 @@ def build(src_pdf, out_dir, extracted, plan, changes, failures, markups_removed,
     corrected_pdf = out_dir / "corrected.pdf"
     src_clean, _ = open_clean(src_pdf)
     corrected = pymupdf.open(corrected_pdf)
-    highlighted_pdf(corrected_pdf, changes, out_dir / "corrected_highlighted.pdf", findings)
+    res = resolution(extracted, plan, changes, failures, skipped)
+    highlighted_pdf(corrected_pdf, changes, out_dir / "corrected_highlighted.pdf", findings, extracted, res)
     before_after(src_clean, corrected, changes, out_dir)
     overview(corrected, changes, extracted, out_dir, findings)
-    res = resolution(extracted, plan, changes, failures, skipped)
     integ = integrity(src_clean, corrected, changes)
     checklist = _checklist(plan, failures)
     _md_checklist(checklist, out_dir / "checklist.md")
