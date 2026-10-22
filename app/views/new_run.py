@@ -23,11 +23,11 @@ HELP = {
     "backbox": "Used when a comment asks for back box sizes: the size is written into the legend, for example "
                "75x75x50mm. Leave empty to list it for the engineer instead.",
     "conduit_size": "Nominal conduit size used in the conduit fill table, when a comment asks for a fill "
-                    "calculation.",
+                    "calculation. Leave empty to use the standard 20 mm conduit; the table states the values used.",
     "conduit_area": "Internal cross-section area of that conduit. Fill % is the total cable area divided by this "
-                    "area.",
-    "max_fill": "Maximum allowed conduit fill from the project standard (40% is typical). Spare capacity is "
-                "measured against it.",
+                    "area. Leave empty to use 219 mm2 (standard 20 mm conduit).",
+    "max_fill": "Maximum allowed conduit fill from the project standard. Spare capacity is measured against it. "
+                "Leave empty to use 40%.",
     "overrides": 'Use a different conduit for specific cable types, for example '
                  '{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}. Names must match the Cable Type table '
                  'on the drawing exactly. Leave {} if all cables share one conduit.',
@@ -45,12 +45,6 @@ HELP = {
 }
 STAGES = {"extract": "Reading consultant comments", "plan": "Planning fixes",
           "apply": "Applying vector edits", "report": "Building report and images"}
-
-
-def _default_inputs():
-    """Neutral starting values: a common conduit spec and nothing project-specific. Back box size, overrides,
-    quantities and elevations stay empty so only what the user enters is written onto the drawing."""
-    return {"conduit": dict(config.CONDUIT)}
 
 
 def _safe_name(name):
@@ -107,34 +101,46 @@ def _elevations(defaults):
 
 
 def _inputs_form():
-    d = _default_inputs()
-    conduit = {**config.CONDUIT, **d.get("conduit", {})}
-    st.markdown("**Engineer inputs**")
-    st.caption("Facts the drawing does not contain. They are applied as given, never guessed.")
-    c1, c2, c3, c4 = st.columns(4)
-    backbox = c1.text_input("Back box size", d.get("backbox_size", ""), help=HELP["backbox"])
-    size = c2.number_input("Conduit size (mm)", value=float(conduit["size_mm"]), min_value=1.0, step=1.0,
-                           help=HELP["conduit_size"])
-    area = c3.number_input("Conduit area (mm2)", value=float(conduit["area_mm2"]), min_value=1.0, step=1.0,
-                           help=HELP["conduit_area"])
-    fill = c4.number_input("Max fill (%)", value=float(conduit["max_fill_pct"]), min_value=1.0, max_value=100.0,
-                           help=HELP["max_fill"])
-    with st.expander("Advanced: per-cable conduit overrides and cable quantities (JSON)"):
-        overrides = st.text_area("Conduit overrides", json.dumps(d.get("conduit_overrides", {}), indent=2),
-                                 height=110, help=HELP["overrides"])
-        qty = st.text_area("Cable quantities", json.dumps(d.get("cable_qty", {}), indent=2), height=80,
-                           help=HELP["cable_qty"])
-    inputs = {"conduit": {"size_mm": int(size) if size.is_integer() else size, "area_mm2": area,
-                          "max_fill_pct": fill}}
+    """Optional engineer inputs, all empty by default: the PDF alone is enough to run. Only values the user
+    enters are applied; fixes that need a missing value are reported as ready to fix."""
+    with st.expander("Optional: engineer inputs"):
+        st.caption("Facts the drawing does not contain, such as sizes from the project specification. Leave "
+                   "everything empty to process the PDF alone; anything entered is applied as given, never guessed.")
+        c1, c2, c3, c4 = st.columns(4)
+        backbox = c1.text_input("Back box size", placeholder="e.g. 75x75x50mm", help=HELP["backbox"])
+        size = c2.number_input("Conduit size (mm)", value=None, min_value=1.0, step=1.0,
+                               placeholder=f"Default {config.CONDUIT['size_mm']:g}", help=HELP["conduit_size"])
+        area = c3.number_input("Conduit area (mm2)", value=None, min_value=1.0, step=1.0,
+                               placeholder=f"Default {config.CONDUIT['area_mm2']:g}", help=HELP["conduit_area"])
+        fill = c4.number_input("Max fill (%)", value=None, min_value=1.0, max_value=100.0,
+                               placeholder=f"Default {config.CONDUIT['max_fill_pct']:g}", help=HELP["max_fill"])
+        st.markdown("**Per-cable conduit overrides and cable quantities (JSON)**")
+        c5, c6 = st.columns(2)
+        overrides = c5.text_area("Conduit overrides", "", height=90, help=HELP["overrides"],
+                                 placeholder='{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}')
+        qty = c6.text_area("Cable quantities", "", height=90, help=HELP["cable_qty"],
+                           placeholder='{"CAT6 / Fibre": 2}')
+        heights, error = _elevations({})
+    conduit = {k: v for k, v in (("size_mm", size), ("area_mm2", area), ("max_fill_pct", fill)) if v is not None}
+    if "size_mm" in conduit and float(conduit["size_mm"]).is_integer():
+        conduit["size_mm"] = int(conduit["size_mm"])
+    inputs = {"conduit": conduit} if conduit else {}
     if backbox.strip():
         inputs["backbox_size"] = backbox.strip()
     try:
-        inputs["conduit_overrides"] = json.loads(overrides or "{}")
-        inputs["cable_qty"] = json.loads(qty or "{}")
+        for field, text in (("conduit_overrides", overrides), ("cable_qty", qty)):
+            value = json.loads(text) if text.strip() else {}
+            if not isinstance(value, dict):
+                raise ValueError("expected an object like {...}")
+            if value:
+                inputs[field] = value
     except ValueError as e:
-        return None, f"Advanced inputs are not valid JSON: {e}"
-    inputs["elevations"], error = _elevations(d.get("elevations") or {})
-    return (None, error) if error else (inputs, None)
+        return None, f"Conduit overrides and cable quantities must be valid JSON objects: {e}"
+    if error:
+        return None, error
+    if heights:
+        inputs["elevations"] = heights
+    return inputs, None
 
 
 def _run(source, revised, reference, planner, inputs):

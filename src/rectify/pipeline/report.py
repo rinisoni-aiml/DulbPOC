@@ -146,6 +146,17 @@ RESOLUTION_LABEL = {"resolved": "Resolved", "partially_resolved": "Partially res
                     "ready_to_fix": "Ready to fix (inputs needed)", "needs_engineer": "Needs engineer"}
 
 
+# Phrases naming a value the user can give as an engineer input (web form or inputs.json).
+INPUT_HINTS = ("inputs.json", "back box size", "backbox size", "mounting height", "architectural background",
+               "architectural reference", "conduit size", "conduit area", "max fill", "cable quantit")
+
+
+def _input_only(item):
+    """A checklist item whose every need is an engineer input: it is ready to fix once that value is given."""
+    needs = item.get("inputs_needed") or []
+    return bool(needs) and all(any(h in n.lower() for h in INPUT_HINTS) for n in needs)
+
+
 def resolution(extracted, plan, changes, failures, skipped):
     """Per comment: what was done, what is waiting for named inputs, what needs an engineer.
 
@@ -160,8 +171,10 @@ def resolution(extracted, plan, changes, failures, skipped):
         edits = [ch["id"] for ch in changes if ch["comment_id"] == cid]
         covered = [s["reason"] for s in skipped if s["comment_id"] == cid]
         fails = [f for f in failures if f["comment_id"] == cid]
+        checklist = plan_by.get(cid, {}).get("checklist", [])
         inputs = [n for f in fails if f.get("kind") == "input" for n in f.get("inputs_needed", [])]
-        engineer = [k["item"] for k in plan_by.get(cid, {}).get("checklist", [])]
+        inputs += [n for k in checklist if _input_only(k) for n in k["inputs_needed"]]
+        engineer = [k["item"] for k in checklist if not _input_only(k)]
         engineer += [f["reason"] for f in fails if f.get("kind") != "input"]
         if edits or covered:
             status = "partially_resolved" if (inputs or engineer) else "resolved"

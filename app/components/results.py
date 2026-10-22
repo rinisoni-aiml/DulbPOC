@@ -77,6 +77,14 @@ def render_run(run, key):
     usd = f" | LLM cost ${run['llm_usd']:.3f}" if run.get("llm_usd") is not None else ""
     st.markdown(f"<p class='muted'>Source: {clean(run['source_name'])} | Planner: {clean(run['planner'])}{usd} | "
                 f"Run ID: {run['id']}</p>", unsafe_allow_html=True)
+    stem = Path(run["source_name"]).stem
+    b1, b2, _ = st.columns([1, 1, 1])
+    for col, (name, label, kind) in zip((b1, b2), (("corrected.pdf", "Download corrected drawing (PDF)", "primary"),
+                                                   ("corrected_highlighted.pdf", "Download with changes highlighted",
+                                                    "secondary"))):
+        if (d / name).exists():
+            col.download_button(label, (d / name).read_bytes(), file_name=f"{stem}_{name}", mime="application/pdf",
+                                key=f"top-{key}-{name}", type=kind, width="stretch")
 
     names = ["Summary", "Drawing", "Engineer checklist"] + (["Verification"] if ver else []) + ["Downloads"]
     tabs = dict(zip(names, st.tabs(names)))
