@@ -6,12 +6,18 @@ Redactions only ever remove glyphs (text ops) or paths fully inside a device sym
 swaps), so the rest of the drawing stays byte-for-byte the same content.
 """
 import json
+import re
+import statistics
 import textwrap
+from pathlib import Path
 
 import pymupdf
 
 from ..core import config
-from ..domain.conduit import conduit_fill, find_cable_table
+from ..domain.conduit import assumptions, conduit_fill, find_cable_table
+from ..domain.elevations import missing_elevations
+from ..domain.space_ids import space_labels
+from ..pdf.align import Aligner
 from ..pdf.geometry import (FreeSpace, dir_to_rotate, font_by_family, int_to_rgb, open_clean, rect_list,
                      span_font, text_length, text_lines, to_pdf, to_vis, upright_rotate)
 
@@ -42,6 +48,7 @@ class Rectifier:
         self.ex = extracted
         self.inputs = inputs or {}
         self.changes, self.failures, self.skipped = [], [], []
+        self.findings = []  # facts found on the sheet (e.g. devices without an elevation label)
         self._free, self._drawings = {}, {}
         self.pages = {p["page"]: p for p in extracted["pages"]}
 
@@ -68,17 +75,26 @@ class Rectifier:
             self._drawings[pno] = ds
         return self._drawings[pno]
 
-    def _record(self, c, op, page, pdf_rect, description, before=None, after=None):
+    def _record(self, c, op, page, pdf_rect, description, before=None, after=None, items=None):
+        """One change. `items` (pdf rects) lists every edited spot when one change touches many."""
         vis = to_vis(page, pdf_rect)
-        self.changes.append({
+        ch = {
             "id": f"CH-{len(self.changes) + 1:02d}", "comment_id": c["id"], "page": page.number,
             "op": op["type"], "description": description, "before": before, "after": after,
             "bbox_pdf": rect_list(pdf_rect), "bbox_vis": rect_list(vis),
-        })
-        self._free_space(page.number).occupy(vis + (-6, -6, 6, 6))
+        }
+        if items:
+            ch["items_pdf"] = [rect_list(r) for r in items]
+            ch["items_vis"] = [rect_list(to_vis(page, r)) for r in items]
+        self.changes.append(ch)
+        for r in items or [pdf_rect]:
+            self._free_space(page.number).occupy(to_vis(page, r) + (-6, -6, 6, 6))
 
-    def _fail(self, c, op, why):
-        self.failures.append({"comment_id": c["id"], "op": op["type"], "reason": why, "op_detail": op})
+    def _fail(self, c, op, why, needs=None, kind="drafter"):
+        """An op that could not be applied. kind: "input" = applies automatically once `needs` are
+        supplied; "engineer" = needs a decision; "drafter" = must be drawn by hand."""
+        self.failures.append({"comment_id": c["id"], "op": op["type"], "reason": why, "op_detail": op,
+                              "kind": kind, "inputs_needed": needs or ["drafter to apply manually"]})
 
     def _skip(self, c, op, why):
         """Op already satisfied by another comment's edit: not a failure, nothing to draw."""
@@ -284,9 +300,11 @@ class Rectifier:
         widths = [max([text_length(w, fontname, fontfile, fs) for w in head[i]]
                       + [text_length(r[col], fontname, fontfile, fs) for r in rows]) + 2 * pad
                   for i, col in enumerate(cols)]
+        notes = assumptions(conduit, self.inputs.get("conduit_overrides"), self.inputs.get("cable_qty"),
+                            self.inputs.get("conduit_standard"))
         row_h = fs * 1.9
         head_h = fs * 1.25 * max(len(h) for h in head) + 2 * pad
-        title_h, foot_h = fs * 2.2, fs * 3.2
+        title_h, foot_h = fs * 2.2, fs * (1.6 + 1.2 * len(notes))
         W, H = sum(widths), title_h + head_h + row_h * len(rows) + foot_h
         near = pymupdf.Point((table_rect.x0 + table_rect.x1) / 2, table_rect.y1 + H / 2)
         box, ink = self._free_space(pno).find(W, H, near)
@@ -315,14 +333,18 @@ class Rectifier:
             base = ys[1 + r_i] + row_h * 0.68
             for i, col in enumerate(cols):
                 self._draw_text_vis(page, xs[i] + pad, base, r[col], fs)
-        foot = (f"Fill % = total cable cross-section / conduit internal area. Spare % = "
-                f"{conduit['max_fill_pct']:g}% max fill - Fill %. Diameters from the cable type table on this sheet.")
-        for j, part in enumerate(textwrap.wrap(foot, 150)):
+        for j, part in enumerate(notes):
             self._draw_text_vis(page, x0, ys[-1] + fs * (1.4 + 1.2 * j), part, fs * 0.9)
+        exceeds = [r["Cable Type"] for r in rows if r["Check"] == "EXCEEDS"]
         self._record(c, op, page, to_pdf(page, box),
-                     f"Added conduit fill table ({len(rows)} cable types, {conduit['size_mm']:g} mm conduit)"
-                     + (f"; placed over {ink:.0%} existing ink" if ink > 0.01 else ""),
+                     f"Added conduit fill table ({len(rows)} cable types, {conduit['size_mm']:g} mm conduit, "
+                     + (f"{len(exceeds)} over max fill: {', '.join(exceeds)}" if exceeds else "all within max fill")
+                     + ")" + (f"; placed over {ink:.0%} existing ink" if ink > 0.01 else ""),
                      after=json.dumps(rows, ensure_ascii=False))
+        if exceeds:
+            self._fail(c, op, f"conduit fill exceeds {conduit['max_fill_pct']:g}% for: {', '.join(exceeds)}",
+                       needs=["larger conduit or split run for the listed cables (engineer decision)"],
+                       kind="engineer")
 
     def add_note(self, c, op):
         text = (op.get("text") or "").strip()
@@ -347,11 +369,114 @@ class Rectifier:
             self._draw_text_vis(page, box.x0 + 4, box.y0 + 4 + fs * (1.0 + 1.3 * j), p, fs)
         self._record(c, op, page, to_pdf(page, box), f"Added note: {text}", after=text)
 
+    # ---- device elevations -------------------------------------------------------------------
+    def _not_device_zones(self, pno, lines):
+        """Areas whose tags are examples, not devices: the legend and the tag-format key."""
+        zones = [r for r in [self._legend(pno)] if r]
+        key = re.compile(config.TAG_KEY_RE, re.I)
+        for l in lines:
+            if key.search(l["text"]):
+                zones.append(l["vis"] + (-260, -160, 60, 160))
+        return zones
+
+    def mark_missing_elevations(self, c, op):
+        """List devices whose tag has no H=...mm label nearby; add the label where inputs give the height."""
+        pno = c["page"]
+        page = self._page(pno)
+        lines = text_lines(page)
+        missing, tags, labels = missing_elevations(lines, self._not_device_zones(pno, lines))
+        heights = {str(k): re.sub(r"\D", "", str(v)) for k, v in (self.inputs.get("elevations") or {}).items()}
+        sizes = [l["line"]["spans"][0]["size"] for l in labels] or [8.0]
+        size = statistics.median(sizes)
+        fontname, fontfile = font_by_family(config.NEW_TEXT_FONT)
+        added, open_ = [], []
+        for t in missing:
+            h = heights.get(t["type"])
+            if not h:
+                open_.append(t)
+                continue
+            text = f"H={h}mm"
+            w = text_length(text, fontname, fontfile, size)
+            near = pymupdf.Point((t["vis"].x0 + t["vis"].x1) / 2, t["vis"].y1 + size * 1.2)
+            box, ink = self._free_space(pno).find(w, size * 1.3, near, pad=2)
+            if box is None or abs(box.tl - near) > 90:
+                open_.append(t)
+                continue
+            self._draw_text_vis(page, box.x0, box.y0 + size, text, size)
+            added.append((t, box, text))
+        for t in missing:
+            self.findings.append({
+                "kind": "missing_elevation", "comment_id": c["id"], "page": pno, "tag": t["tag"], "type": t["type"],
+                "bbox_pdf": rect_list(t["pdf"]), "bbox_vis": rect_list(t["vis"]),
+                "added": next((txt for tt, _, txt in added if tt is t), None),
+            })
+        if added:
+            boxes = [to_pdf(page, b) for _, b, _ in added]
+            union = pymupdf.Rect(boxes[0])
+            for b in boxes[1:]:
+                union |= b
+            self._record(c, op, page, union, f"Added elevation labels to {len(added)} device(s): "
+                         + ", ".join(f"{t['tag']} {txt}" for t, _, txt in added), after=None, items=boxes)
+        if open_:
+            types = sorted({t["type"] for t in open_})
+            self._fail(c, op, f"{len(open_)} of {len(tags)} devices have no elevation label: "
+                       + ", ".join(t["tag"] for t in open_),
+                       needs=[f"mounting height for device type(s) {', '.join(types)} "
+                              "(inputs.json: elevations, e.g. from the RFI response)"], kind="input")
+
+    # ---- space IDs --------------------------------------------------------------------------
+    def place_space_ids(self, c, op):
+        """Copy room/space IDs (and room names) from an architectural reference drawing."""
+        ref_path = self.inputs.get("reference_pdf")
+        need = ["architectural background drawing showing space IDs (inputs.json: reference_pdf, or --reference)"]
+        if not ref_path or not Path(ref_path).exists():
+            return self._fail(c, op, "no architectural reference drawing supplied", needs=need, kind="input")
+        pno = c["page"]
+        page = self._page(pno)
+        ref, _ = open_clean(ref_path)
+        rp = ref[0]
+        labels = space_labels(text_lines(rp))
+        if not labels:
+            return self._fail(c, op, f"no space IDs matching {config.SPACE_ID_RE} in {Path(ref_path).name}",
+                              needs=need, kind="input")
+        manual = self.inputs.get("reference_offset")  # [dx, dy] vis pt, reference -> this sheet
+        aligner = None if manual else Aligner(rp, page)
+        if aligner is not None and not aligner.clusters:
+            return self._fail(c, op, "could not align the reference drawing with this sheet",
+                              needs=["reference_offset [dx, dy] in inputs.json"], kind="input")
+        existing = {l["text"].strip() for l in text_lines(page)}
+        boxes, placed = [], []
+        for lab in labels:
+            if lab["id"] in existing:
+                continue
+            dx, dy = manual or aligner.cluster_for(lab["id_line"]["vis"])
+            color = int_to_rgb(lab["color"])
+            for line in (lab["name_line"], lab["id_line"]):
+                if line is None:
+                    continue
+                v = line["vis"] + (dx, dy, dx, dy)
+                if not page.rect.contains(v):
+                    break
+                size = line["spans"][0]["size"]
+                self._draw_text_vis(page, v.x0, v.y1 - size * 0.21, line["text"], size, color=color)
+                boxes.append(to_pdf(page, v))
+            else:
+                placed.append(lab["id"])
+        if not placed:
+            return self._skip(c, op, "every space ID in the reference is already on this sheet")
+        union = pymupdf.Rect(boxes[0])
+        for b in boxes[1:]:
+            union |= b
+        self._record(c, op, page, union, f"Placed {len(placed)} space IDs from {Path(ref_path).name}",
+                     after=json.dumps(placed), items=boxes)
+
     # ---- driver ----------------------------------------------------------------------------
     def run(self, plan):
         by_id = {c["id"]: c for c in self.ex["comments"]}
         handlers = {"replace_text": self.replace_text, "swap_symbol": self.swap_symbol,
-                    "add_conduit_fill_table": self.add_conduit_fill_table, "add_note": self.add_note}
+                    "add_conduit_fill_table": self.add_conduit_fill_table, "add_note": self.add_note,
+                    "mark_missing_elevations": self.mark_missing_elevations,
+                    "place_space_ids": self.place_space_ids}
         for p in plan["comments"]:
             c = by_id.get(p["comment_id"])
             for op in p.get("ops", []):

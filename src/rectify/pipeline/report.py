@@ -21,17 +21,33 @@ def _font(size):
         return ImageFont.load_default()
 
 
-def highlighted_pdf(corrected_pdf, changes, path):
-    """Copy of the corrected sheet with a toggleable red box + note per change (Acrobat comments)."""
+def _rects(ch, key="pdf"):
+    """Every spot a change touched (one bbox, or one per item for multi-spot changes)."""
+    return ch.get(f"items_{key}") or [ch[f"bbox_{key}"]]
+
+
+def highlighted_pdf(corrected_pdf, changes, path, findings=()):
+    """Copy of the corrected sheet with toggleable boxes + notes (Acrobat comments):
+    red = AI change, orange = finding still open (e.g. device without an elevation label)."""
     doc = pymupdf.open(corrected_pdf)
     for ch in changes:
         page = doc[ch["page"]]
-        r = pymupdf.Rect(ch["bbox_pdf"]) + (-4, -4, 4, 4)
-        a = page.add_rect_annot(r)
-        a.set_colors(stroke=config.HIGHLIGHT_RGB)
-        a.set_border(width=1.5, dashes=[3, 2])
-        a.set_info(title=config.AUTHOR, subject=f"{ch['id']} / {ch['comment_id']}",
-                   content=f"{ch['id']} ({ch['comment_id']}): {ch['description']}")
+        for rect in _rects(ch):
+            a = page.add_rect_annot(pymupdf.Rect(rect) + (-4, -4, 4, 4))
+            a.set_colors(stroke=config.HIGHLIGHT_RGB)
+            a.set_border(width=1.5, dashes=[3, 2])
+            a.set_info(title=config.AUTHOR, subject=f"{ch['id']} / {ch['comment_id']}",
+                       content=f"{ch['id']} ({ch['comment_id']}): {ch['description']}")
+            a.update()
+    for f in findings:
+        if f["kind"] != "missing_elevation" or f.get("added"):
+            continue
+        page = doc[f["page"]]
+        a = page.add_rect_annot(pymupdf.Rect(f["bbox_pdf"]) + (-5, -5, 5, 5))
+        a.set_colors(stroke=config.FINDING_RGB)
+        a.set_border(width=1.5)
+        a.set_info(title=config.AUTHOR, subject=f"{f['comment_id']} / elevation missing",
+                   content=f"{f['comment_id']}: no elevation (H=...mm) label found for {f['tag']}")
         a.update()
     doc.save(str(path), garbage=3, deflate=True)
 
@@ -41,7 +57,7 @@ def before_after(src_clean, corrected, changes, out_dir):
     folder = out_dir / "before_after"
     folder.mkdir(exist_ok=True)
     for ch in changes:
-        b = pymupdf.Rect(ch["bbox_vis"])
+        b = pymupdf.Rect(_rects(ch, "vis")[0])  # multi-spot changes: show the first spot
         pad = config.BEFORE_AFTER_PAD
         clip = b + (-pad, -pad, pad, pad)
         page_a, page_b = src_clean[ch["page"]], corrected[ch["page"]]
@@ -68,7 +84,7 @@ def before_after(src_clean, corrected, changes, out_dir):
         ch["image"] = f"before_after/{path.name}"
 
 
-def overview(corrected, changes, extracted, out_dir):
+def overview(corrected, changes, extracted, out_dir, findings=()):
     """Whole-sheet PNG: change boxes (red) and the comment boxes they answer (orange)."""
     page = corrected[0]
     dpi = 40
@@ -81,10 +97,15 @@ def overview(corrected, changes, extracted, out_dir):
             r = c["box_vis"]
             d.rectangle([r[0] * z, r[1] * z, r[2] * z, r[3] * z], outline=(255, 150, 0), width=2)
             d.text((r[0] * z + 2, r[1] * z + 2), c["id"], fill=(255, 120, 0), font=f)
+    for fd in findings:
+        if fd["page"] == 0 and not fd.get("added"):
+            r = fd["bbox_vis"]
+            d.rectangle([r[0] * z - 5, r[1] * z - 5, r[2] * z + 5, r[3] * z + 5], outline=(255, 140, 0), width=3)
     for ch in changes:
         if ch["page"] == 0:
+            for r in _rects(ch, "vis"):
+                d.rectangle([r[0] * z - 6, r[1] * z - 6, r[2] * z + 6, r[3] * z + 6], outline=(220, 0, 0), width=3)
             r = ch["bbox_vis"]
-            d.rectangle([r[0] * z - 6, r[1] * z - 6, r[2] * z + 6, r[3] * z + 6], outline=(220, 0, 0), width=3)
             d.text((r[2] * z + 8, r[1] * z - 6), ch["id"], fill=(220, 0, 0), font=f)
     img.save(out_dir / "overview.png")
 
@@ -100,9 +121,9 @@ def integrity(src_clean, corrected, changes):
         diff = np.abs(a - b) > 40
         for ch in changes:
             if ch["page"] == pno:
-                r = ch["bbox_vis"]
-                diff[max(0, int((r[1] - 8) * z)):int((r[3] + 8) * z) + 1,
-                     max(0, int((r[0] - 8) * z)):int((r[2] + 8) * z) + 1] = False
+                for r in _rects(ch, "vis"):
+                    diff[max(0, int((r[1] - 8) * z)):int((r[3] + 8) * z) + 1,
+                         max(0, int((r[0] - 8) * z)):int((r[2] + 8) * z) + 1] = False
         total += diff.size
         outside += int(diff.sum())
     return {"changed_pixels_outside_edits": outside, "share": outside / max(total, 1)}
@@ -114,10 +135,41 @@ def _checklist(plan, failures):
         for k in p.get("checklist", []):
             items.append({"comment_id": p["comment_id"], **k, "source": "plan"})
     for f in failures:
-        items.append({"comment_id": f["comment_id"], "item": f"Could not auto-apply {f['op']}: {f['reason']}",
-                      "inputs_needed": ["drafter to apply manually"], "where_on_sheet": "see comment",
-                      "source": "apply"})
+        verb = "Waiting for input" if f.get("kind") == "input" else "Could not auto-apply"
+        items.append({"comment_id": f["comment_id"], "item": f"{verb} ({f['op']}): {f['reason']}",
+                      "inputs_needed": f.get("inputs_needed") or ["drafter to apply manually"],
+                      "where_on_sheet": "see comment", "source": "apply", "kind": f.get("kind", "drafter")})
     return items
+
+
+RESOLUTION_LABEL = {"resolved": "Resolved", "partially_resolved": "Partially resolved",
+                    "ready_to_fix": "Ready to fix (inputs needed)", "needs_engineer": "Needs engineer"}
+
+
+def resolution(extracted, plan, changes, failures, skipped):
+    """Per comment: what was done, what is waiting for named inputs, what needs an engineer.
+
+    Item shape: {"comment_id", "status", "edits": [CH ids], "covered": [reasons],
+                 "inputs_needed": [str], "engineer_actions": [str]}
+    status: resolved | partially_resolved | ready_to_fix | needs_engineer
+    """
+    plan_by = {p["comment_id"]: p for p in plan["comments"]}
+    out = []
+    for c in extracted["comments"]:
+        cid = c["id"]
+        edits = [ch["id"] for ch in changes if ch["comment_id"] == cid]
+        covered = [s["reason"] for s in skipped if s["comment_id"] == cid]
+        fails = [f for f in failures if f["comment_id"] == cid]
+        inputs = [n for f in fails if f.get("kind") == "input" for n in f.get("inputs_needed", [])]
+        engineer = [k["item"] for k in plan_by.get(cid, {}).get("checklist", [])]
+        engineer += [f["reason"] for f in fails if f.get("kind") != "input"]
+        if edits or covered:
+            status = "partially_resolved" if (inputs or engineer) else "resolved"
+        else:
+            status = "ready_to_fix" if inputs else "needs_engineer"
+        out.append({"comment_id": cid, "status": status, "edits": edits, "covered": covered,
+                    "inputs_needed": list(dict.fromkeys(inputs)), "engineer_actions": engineer})
+    return out
 
 
 def _md_checklist(items, path):
@@ -152,7 +204,9 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
     for ch in changes:
         by_comment.setdefault(ch["comment_id"], []).append(ch)
     status = {p["comment_id"]: p for p in plan["comments"]}
-    auto = sum(1 for p in plan["comments"] if p["status"] == "auto" and p["comment_id"] in by_comment)
+    res = {r["comment_id"]: r for r in meta.get("resolution", [])}
+    counts = {k: sum(1 for r in res.values() if r["status"] == k) for k in RESOLUTION_LABEL}
+    missing = [f for f in meta.get("findings", []) if f["kind"] == "missing_elevation"]
     usage = plan.get("usage") or {}
     parts = [f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' "
              f"content='width=device-width,initial-scale=1'><title>Rectification Report</title><style>{CSS}</style></head><body><main>",
@@ -161,23 +215,31 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
              "<div class='kpis'>",
              f"<div class='kpi'><b>{len(extracted['comments'])}</b><span>consultant comments</span></div>",
              f"<div class='kpi'><b>{len(changes)}</b><span>vector edits applied</span></div>",
-             f"<div class='kpi'><b>{len(by_comment)}</b><span>comments with edits ({auto} fully)</span></div>",
-             f"<div class='kpi'><b>{len(checklist)}</b><span>engineer checklist items</span></div>",
+             f"<div class='kpi'><b>{counts['resolved']}</b><span>comments resolved</span></div>",
+             f"<div class='kpi'><b>{counts['partially_resolved']}</b><span>partially resolved</span></div>",
+             f"<div class='kpi'><b>{counts['ready_to_fix']}</b><span>ready to fix once inputs given</span></div>",
+             f"<div class='kpi'><b>{counts['needs_engineer']}</b><span>need engineer</span></div>",
              f"<div class='kpi'><b>{meta['markups_removed']}</b><span>markups removed</span></div>",
              f"<div class='kpi'><b>{integ['share']:.3%}</b><span>sheet changed outside edits</span></div>",
              "</div>",
              "<p class='files'><a href='corrected.pdf'>corrected.pdf</a><a href='corrected_highlighted.pdf'>"
              "corrected_highlighted.pdf</a><a href='checklist.md'>checklist.md</a><a href='changes.json'>changes.json</a>"
              "<a href='plan.json'>plan.json</a></p>",
-             "<h2>Sheet overview</h2><p class='sub'>Orange: consultant comments. Red: AI edits.</p>"
+             "<h2>Sheet overview</h2><p class='sub'>Orange boxes: consultant comments and devices without an "
+             "elevation label. Red: AI edits.</p>"
              "<img src='overview.png' alt='Corrected sheet with edit locations'>",
              "<h2>Comments</h2>"]
     for c in extracted["comments"]:
         p = status.get(c["id"], {})
-        st = p.get("status", "engineer")
-        parts.append(f"<div class='card'><h3>{e(c['id'])} <span class='tag {st}'>{e(st)}</span>"
+        r = res.get(c["id"], {})
+        rs = r.get("status", "needs_engineer")
+        css = {"resolved": "auto", "partially_resolved": "partial", "ready_to_fix": "partial"}.get(rs, "engineer")
+        parts.append(f"<div class='card'><h3>{e(c['id'])} <span class='tag {css}'>{e(RESOLUTION_LABEL[rs])}</span>"
                      f"<span class='tag'>{e(p.get('scope', ''))}</span></h3>"
                      f"<div class='quote'>{e(p.get('clean_text') or c['text'])}</div>")
+        if r.get("inputs_needed"):
+            parts.append("<p><b>Will be fixed automatically once these inputs are supplied:</b></p><ul>"
+                         + "".join(f"<li>{e(x)}</li>" for x in r["inputs_needed"]) + "</ul>")
         if p.get("intent"):
             parts.append(f"<p><b>Intent:</b> {e(p['intent'])}</p>")
         for ch in by_comment.get(c["id"], []):
@@ -195,6 +257,14 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
                 f"<li>{e(k['item'])} <i>(needs: {e(', '.join(k['inputs_needed']))})</i></li>"
                 for k in p["checklist"]) + "</ul>")
         parts.append("</div>")
+    if missing:
+        parts.append(f"<h2>Devices without an elevation label ({len(missing)})</h2><p class='sub'>Marked orange in "
+                     "corrected_highlighted.pdf. Supply heights per device type in inputs.json (elevations) to add "
+                     "them automatically.</p><table><tr><th>Device tag</th><th>Type</th><th>Status</th></tr>")
+        for f in missing:
+            parts.append(f"<tr><td>{e(f['tag'])}</td><td>{e(f['type'])}</td>"
+                         f"<td>{e('added ' + f['added'] if f.get('added') else 'height needed')}</td></tr>")
+        parts.append("</table>")
     parts.append("<h2>Engineer checklist</h2><table><tr><th>Comment</th><th>Action</th><th>Inputs needed</th><th>Where</th></tr>")
     for i in checklist:
         parts.append(f"<tr><td>{e(i['comment_id'])}</td><td>{e(i['item'])}</td>"
@@ -210,19 +280,23 @@ def html_report(out_dir, extracted, plan, changes, failures, checklist, integ, m
     (out_dir / "report.html").write_text("".join(parts), encoding="utf-8")
 
 
-def build(src_pdf, out_dir, extracted, plan, changes, failures, markups_removed, skipped=()):
+def build(src_pdf, out_dir, extracted, plan, changes, failures, markups_removed, skipped=(), findings=()):
     corrected_pdf = out_dir / "corrected.pdf"
     src_clean, _ = open_clean(src_pdf)
     corrected = pymupdf.open(corrected_pdf)
-    highlighted_pdf(corrected_pdf, changes, out_dir / "corrected_highlighted.pdf")
+    highlighted_pdf(corrected_pdf, changes, out_dir / "corrected_highlighted.pdf", findings)
     before_after(src_clean, corrected, changes, out_dir)
-    overview(corrected, changes, extracted, out_dir)
+    overview(corrected, changes, extracted, out_dir, findings)
+    res = resolution(extracted, plan, changes, failures, skipped)
     integ = integrity(src_clean, corrected, changes)
     checklist = _checklist(plan, failures)
     _md_checklist(checklist, out_dir / "checklist.md")
+    missing = [f for f in findings if f["kind"] == "missing_elevation"]
     (out_dir / "changes.json").write_text(json.dumps({"changes": changes, "failures": failures,
-                                                      "skipped": list(skipped), "integrity": integ},
+                                                      "skipped": list(skipped), "resolution": res,
+                                                      "missing_elevations": missing, "integrity": integ},
                                                      indent=2, ensure_ascii=False), encoding="utf-8")
     html_report(out_dir, extracted, plan, changes, failures, checklist, integ,
-                {"source_name": src_pdf.name, "markups_removed": markups_removed, "skipped": list(skipped)})
+                {"source_name": src_pdf.name, "markups_removed": markups_removed, "skipped": list(skipped),
+                 "resolution": res, "findings": list(findings)})
     return integ, checklist

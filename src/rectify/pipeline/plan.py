@@ -6,12 +6,14 @@ Either way the ops are validated against the drawing in apply.py before anything
 """
 import base64
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from ..core import config
 
 SCOPES = ["local", "sheet_wide", "legend", "layout", "calculation", "external_input"]
-OP_TYPES = ["replace_text", "swap_symbol", "add_conduit_fill_table", "add_note"]
+OP_TYPES = ["replace_text", "swap_symbol", "add_conduit_fill_table", "add_note",
+            "mark_missing_elevations", "place_space_ids"]
 NULL_STR = {"type": ["string", "null"]}
 
 PLAN_SCHEMA = {
@@ -79,6 +81,8 @@ table and ENGINEER INPUTS; you only give the rationale.
 record a reference that is stated in the comment itself (e.g. an RFI number or a drawing cross-reference). \
 State the reference only; never claim that something is attached, approved, received or done \
 (e.g. "REFER TO RFI ECJ-RFI-001632 FOR DEVICE ELEVATIONS", not "... (ATTACHED)").
+- mark_missing_elevations: when a comment says device elevations / mounting heights are missing. The program finds every device tag without an H=...mm label, marks each one, and adds the label where ENGINEER INPUTS give a height for that device type. You only give the rationale.
+- place_space_ids: when a comment asks to restore / show space (room) IDs. The program copies room names and IDs from an architectural reference drawing when one is supplied, otherwise reports it as waiting for that drawing. You only give the rationale. Never type room names or IDs yourself.
 
 Rules:
 - Never invent engineering data: no dimensions, sizes, positions, room names, drawing numbers or \
@@ -223,9 +227,7 @@ def plan_rules(extracted, sheet_text, inputs):
                               "where_on_sheet": "typical installation details strip"})
         elif "space id" in t:
             scope = "sheet_wide"
-            checklist.append({"item": "Restore space/room IDs in every room",
-                              "inputs_needed": ["architectural room schedule (room names + IDs)"],
-                              "where_on_sheet": "all rooms on plan"})
+            ops.append(_op("place_space_ids", "Restore space IDs from the architectural reference drawing."))
         elif "legend" in t and "not a lock" in t:
             scope = "sheet_wide"
             if "LOCK TYPE" in legend:
@@ -262,9 +264,12 @@ def plan_rules(extracted, sheet_text, inputs):
             ops.append(_op("add_conduit_fill_table", "Consultant requires conduit fill calculation with spare %."))
         elif "elevation" in t:
             scope = "external_input"
-            checklist.append({"item": "Add mounting elevation (H=...) to every device",
-                              "inputs_needed": ["RFI ECJ-RFI-001632 response", "device elevations"],
-                              "where_on_sheet": "all devices"})
+            ops.append(_op("mark_missing_elevations", "Find devices without an elevation label; add heights "
+                                                      "where engineer inputs give them."))
+            rfi = re.search(r"RFI[\s-]*[A-Z0-9-]+", c["text"])
+            if rfi:
+                checklist.append({"item": f"Attach the response to {rfi.group(0)} to the resubmission",
+                                  "inputs_needed": [f"{rfi.group(0)} response"], "where_on_sheet": "transmittal"})
         else:
             checklist.append({"item": c["text"], "inputs_needed": ["engineer review"], "where_on_sheet": where})
         status = "engineer" if not ops else ("auto" if not checklist else "partial")

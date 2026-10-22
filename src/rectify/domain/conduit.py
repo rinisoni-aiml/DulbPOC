@@ -79,5 +79,23 @@ def conduit_fill(cables, conduit=None, quantities=None, overrides=None):
             "Conduit Area (mm²)": f"{c['area_mm2']:g}",
             "Fill %": f"{fill:.2f}%",
             "Spare %": f"{c['max_fill_pct'] - fill:.2f}%",
+            "Check": f"OK (<= {c['max_fill_pct']:g}%)" if fill <= c["max_fill_pct"] else "EXCEEDS",
         })
     return rows, base
+
+
+def assumptions(base, overrides=None, quantities=None, standard=None):
+    """Plain-language basis of the calculation, printed under the table."""
+    lines = [
+        "Fill % = total cable cross-section / conduit internal area. Spare % = max fill - Fill %.",
+        f"Cable outer diameters: 'Assumed' values from the Cable Type table on this sheet. "
+        f"Conduit: {base['size_mm']:g} mm, internal area {base['area_mm2']:g} mm2.",
+        f"Max fill {base['max_fill_pct']:g}%: {standard or config.CONDUIT_STANDARD}.",
+    ]
+    if overrides:
+        lines.append("Own conduit: " + "; ".join(f"{k} {v.get('size_mm', base['size_mm']):g} mm / "
+                                                  f"{v.get('area_mm2', base['area_mm2']):g} mm2"
+                                                  for k, v in overrides.items()) + ".")
+    if not quantities:
+        lines.append("Quantity 1 per cable type per conduit; actual cable counts per run to be confirmed.")
+    return lines

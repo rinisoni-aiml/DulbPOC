@@ -92,10 +92,25 @@ FREE_SPACE_MARGIN = 60   # pt kept clear of the sheet edge
 
 # --- Conduit fill (C-08 style comments); override in inputs.json -------------------
 CONDUIT = {"size_mm": 20, "area_mm2": 219.0, "max_fill_pct": 40.0}
+# Printed under the table so the engineer sees what the numbers rest on; override in inputs.json.
+CONDUIT_STANDARD = ("per NEC Chapter 9 Table 1 (40% for more than two cables) - "
+                    "confirm against the project specification")
+
+# --- Device elevations (C-09 style comments) -----------------------------------------
+# Device tag: TYPE /ZONE /LEVEL /NUMBER, e.g. "L1.2 /MUS /B1 /016", "PIR /MUS /B1 /007".
+DEVICE_TAG_RE = r"^(?P<type>[A-Z][A-Z0-9_.]*)\s*/\s*[A-Z]+\s*/\s*[A-Z0-9]+(?:\s*/\s*\d+)?\s*$"
+DEVICE_TAG_EXCLUDE = {"M"}          # second-line references such as M/BM/FTR/01
+ELEVATION_RE = r"H\s*=\s*\d+\s*mm"   # device elevation labels; trunk labels ("H=4000") have no unit
+ELEVATION_MATCH_DIST = 150          # pt: an H= label this close (vis) to a tag can belong to it
+TAG_KEY_RE = r"REFERENCE NUMBER|EQUIPMENT TYPE"   # the sheet's tag-format key: its example tag is not a device
+
+# --- Space IDs (C-01 style comments) ---------------------------------------------------
+SPACE_ID_RE = r"^[A-Z]{1,3}\.[A-Z0-9]{1,4}\.\d{2,4}[A-Z]?$"   # e.g. M.B1.121
 
 # --- Output ----------------------------------------------------------------------
 AUTHOR = "AI Rectifier"
 HIGHLIGHT_RGB = (0.85, 0.0, 0.0)
+FINDING_RGB = (1.0, 0.55, 0.0)  # open findings, e.g. device without an elevation label
 NEW_INK_RGB = (0.0, 0.0, 0.0)
 BEFORE_AFTER_DPI = 150
 BEFORE_AFTER_PAD = 80    # pt around a change in the before/after crop

@@ -43,6 +43,55 @@ def set_verification(run_id, revised_name, summary, db_path=None):
                     (revised_name, json.dumps(summary), run_id))
 
 
+DECISIONS = ("approved", "rejected")
+
+
+def get_decisions(run_id, db_path=None):
+    """Reviewer decisions for a run's changes: {change_id: {comment_id, decision, note, decided_at}}."""
+    with connect(db_path) as con:
+        rows = con.execute("SELECT change_id, comment_id, decision, note, decided_at FROM approvals "
+                           "WHERE run_id=? ORDER BY change_id", (run_id,)).fetchall()
+    return {r["change_id"]: {k: r[k] for k in ("comment_id", "decision", "note", "decided_at")} for r in rows}
+
+
+def set_decision(run_id, change_id, decision, comment_id=None, note="", db_path=None):
+    """Approve or reject one change; decision None clears it (back to pending). Mirrors to approvals.json."""
+    if decision is not None and decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {DECISIONS} or None, not {decision!r}")
+    with connect(db_path) as con:
+        if decision is None:
+            con.execute("DELETE FROM approvals WHERE run_id=? AND change_id=?", (run_id, change_id))
+        else:
+            con.execute("INSERT INTO approvals (run_id, change_id, comment_id, decision, note, decided_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (run_id, change_id) DO UPDATE SET "
+                        "comment_id=excluded.comment_id, decision=excluded.decision, note=excluded.note, "
+                        "decided_at=excluded.decided_at",
+                        (run_id, change_id, comment_id, decision, note or "",
+                         datetime.now(timezone.utc).isoformat(timespec="seconds")))
+    _write_approvals(run_id, db_path)
+
+
+def _write_approvals(run_id, db_path=None):
+    run = get_run(run_id, db_path)
+    if not run or not run["run_dir"].is_dir():
+        return
+    decisions = get_decisions(run_id, db_path)
+    doc = {"run_id": run_id, "source_name": run["source_name"],
+           "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "decisions": [{"change_id": cid, **d} for cid, d in decisions.items()]}
+    (run["run_dir"] / "approvals.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def decision_counts(db_path=None):
+    """{run_id: {"approved": n, "rejected": n}} for the history table."""
+    with connect(db_path) as con:
+        rows = con.execute("SELECT run_id, decision, COUNT(*) AS n FROM approvals GROUP BY run_id, decision").fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["run_id"], {})[r["decision"]] = r["n"]
+    return out
+
+
 def _row(r):
     d = dict(r)
     d["inputs"] = json.loads(d.pop("inputs_json") or "{}")
@@ -66,6 +115,7 @@ def get_run(run_id, db_path=None):
 def delete_run(run_id, db_path=None):
     run = get_run(run_id, db_path)
     with connect(db_path) as con:
+        con.execute("DELETE FROM approvals WHERE run_id=?", (run_id,))
         con.execute("DELETE FROM runs WHERE id=?", (run_id,))
     if run:
         d = run["run_dir"].resolve()

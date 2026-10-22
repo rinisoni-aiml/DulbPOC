@@ -13,94 +13,20 @@ from collections import Counter, defaultdict
 
 import numpy as np
 import pymupdf
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 from ..core import config
+from ..pdf.align import Aligner
+from ..pdf.align import gray as _gray
 from ..pdf.geometry import open_clean
 from .report import CSS, _font, _pix_to_img
 
 PCT = re.compile(r"^\d+(\.\d+)?%$")
 REGION = 160      # pt: side of the square compared around each leader tip
-METRIC_DPI = 50
 IMAGE_DPI = 110
 
 
-# ---- alignment ---------------------------------------------------------------------------------
-def _word_index(page):
-    idx = defaultdict(list)
-    m = page.rotation_matrix
-    for w in page.get_text("words"):
-        r = pymupdf.Rect(w[:4]) * m
-        idx[w[4]].append(pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2))
-    return idx
-
-
-class Aligner:
-    """Offset (vis space) from the original sheet to the revised sheet near a region.
-
-    Revisions move the plan viewport, legend and tables by different amounts, so offsets are
-    clustered from words occurring exactly once on both sheets; a region takes the cluster best
-    supported by anchors near it, then a small pixel search refines it.
-    """
-
-    def __init__(self, page_a, page_b, min_votes=5):
-        self.a, self.b = page_a, page_b
-        ia, ib = _word_index(page_a), _word_index(page_b)
-        self.anchors = [(ia[t][0], ib[t][0]) for t in ia
-                        if len(ia[t]) == 1 and len(ib.get(t, [])) == 1 and len(t) >= 3]
-        bins = Counter((round((q.x - p.x) / 5) * 5, round((q.y - p.y) / 5) * 5) for p, q in self.anchors)
-        self.clusters = []
-        for (bx, by), n in bins.most_common():
-            if n < min_votes:
-                break
-            if any(abs(bx - cx) <= 10 and abs(by - cy) <= 10 for cx, cy in self.clusters):
-                continue
-            members = [(q.x - p.x, q.y - p.y) for p, q in self.anchors
-                       if abs(q.x - p.x - bx) <= 10 and abs(q.y - p.y - by) <= 10]
-            self.clusters.append((sum(m[0] for m in members) / len(members),
-                                  sum(m[1] for m in members) / len(members)))
-        self.global_offset = self.clusters[0] if self.clusters else (0.0, 0.0)
-
-    def _cluster_for(self, region, k=9):
-        """Majority cluster among the k anchor words nearest to the region."""
-        c = (region.tl + region.br) / 2
-        votes = Counter()
-        for p, q in sorted(self.anchors, key=lambda pq: abs(pq[0] - c)):
-            for i, (cx, cy) in enumerate(self.clusters):
-                if abs(q.x - p.x - cx) <= 10 and abs(q.y - p.y - cy) <= 10:
-                    votes[i] += 1
-                    break
-            if sum(votes.values()) >= k:
-                break
-        return self.clusters[votes.most_common(1)[0][0]] if votes else self.global_offset
-
-    def offset(self, region, search=30):
-        """Cluster offset near the region, refined by the best pixel match within +-search pt."""
-        cx, cy = self._cluster_for(region)
-        ga = _gray(self.a, region)
-        gb = _gray(self.b, region + (cx - search, cy - search, cx + search, cy + search))
-        if ga is None or gb is None:
-            return (cx, cy), "anchors"
-        z = METRIC_DPI / 72
-        h, w = ga.shape
-        best, best_d = (0, 0), None
-        for dy in range(0, gb.shape[0] - h + 1, 2):
-            for dx in range(0, gb.shape[1] - w + 1, 2):
-                d = float(np.abs(gb[dy:dy + h, dx:dx + w] - ga).mean())
-                if best_d is None or d < best_d:
-                    best, best_d = (dx, dy), d
-        return (cx - search + best[0] / z, cy - search + best[1] / z), "anchors+pixels"
-
-
 # ---- pixel comparison ------------------------------------------------------------------------
-def _gray(page, rect, dpi=METRIC_DPI):
-    clip = rect & page.rect
-    if clip.is_empty or clip.width < 5 or clip.height < 5:
-        return None
-    img = _pix_to_img(page.get_pixmap(dpi=dpi, clip=clip, annots=False)).convert("L")
-    return np.asarray(img.filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float32)
-
-
 def _mad(a, b):
     if a is None or b is None:
         return None
@@ -189,6 +115,7 @@ def verify(src_pdf, revised_pdf, out_dir):
     plan = json.loads((out_dir / "plan.json").read_text(encoding="utf-8"))
     chg = json.loads((out_dir / "changes.json").read_text(encoding="utf-8"))
     changes, failures, skipped = chg["changes"], chg["failures"], chg.get("skipped", [])
+    res_by = {r["comment_id"]: r for r in chg.get("resolution", [])}
 
     marked = pymupdf.open(src_pdf)
     orig, _ = open_clean(src_pdf)
@@ -284,6 +211,9 @@ def verify(src_pdf, revised_pdf, out_dir):
             verdict = "Not fixed"
         if mine and not p.get("checklist") and fails:
             verdict = "Partially fixed"
+        status = res_by.get(cid, {}).get("status")
+        if status:  # the apply stage's resolution status is the single source of truth when present
+            verdict = {"resolved": "Fixed", "partially_resolved": "Partially fixed"}.get(status, "Not fixed")
         missed = bool(pr) and human_changed and not mine and not cov
         rows.append({
             "id": cid, "comment": p.get("clean_text") or c["text"], "intent": p.get("intent", ""),

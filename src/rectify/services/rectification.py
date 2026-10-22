@@ -22,8 +22,12 @@ def load_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def load_inputs(path):
-    return load_json(path) if path else {}
+def load_inputs(path, reference=None):
+    """Engineer inputs JSON; `reference` (architectural drawing with space IDs) overrides reference_pdf."""
+    inputs = load_json(path) if path else {}
+    if reference:
+        inputs["reference_pdf"] = str(reference)
+    return inputs
 
 
 def extract_drawing(pdf, out):
@@ -57,10 +61,15 @@ def apply_fixes(pdf, out, inputs=None):
     r = Rectifier(Path(pdf), ex, inputs or {})
     changes, failures = r.run(p)
     r.save(out / "corrected.pdf")
+    missing = [f for f in r.findings if f["kind"] == "missing_elevation" and not f.get("added")]
     applied = {"edits": len(changes), "skipped": len(r.skipped), "failures": len(failures),
-               "markups_removed": r.markups_removed, "path": out / "corrected.pdf"}
-    integ, checklist = build(Path(pdf), out, ex, p, changes, failures, r.markups_removed, r.skipped)
-    report = {"checklist_items": len(checklist), "integrity": integ, "path": out / "report.html"}
+               "markups_removed": r.markups_removed, "missing_elevations": len(missing),
+               "path": out / "corrected.pdf"}
+    integ, checklist = build(Path(pdf), out, ex, p, changes, failures, r.markups_removed, r.skipped, r.findings)
+    res = load_json(out / "changes.json").get("resolution", [])
+    report = {"checklist_items": len(checklist), "integrity": integ, "path": out / "report.html",
+              "resolution": {k: sum(1 for x in res if x["status"] == k)
+                             for k in ("resolved", "partially_resolved", "ready_to_fix", "needs_engineer")}}
     return applied, report
 
 

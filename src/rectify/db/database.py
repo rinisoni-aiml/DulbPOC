@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS runs (
     run_dir             TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_created ON runs (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    run_id      TEXT NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    change_id   TEXT NOT NULL,                  -- changes.json "id", e.g. CH-01
+    comment_id  TEXT,
+    decision    TEXT NOT NULL,                  -- approved | rejected
+    note        TEXT NOT NULL DEFAULT '',
+    decided_at  TEXT NOT NULL,
+    PRIMARY KEY (run_id, change_id)
+);
 """
 
 

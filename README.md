@@ -33,7 +33,7 @@ rectify-poc/
 ├── .streamlit/config.toml        # web app theme and upload limit
 ├── config/
 │   └── inputs.example.json       # engineer inputs (backbox size, conduit spec, ...)
-├── samples/                      # sample commented drawing + its human revision
+├── samples/                      # local sample drawings (git-ignored: client PDFs)
 ├── app/                          # frontend: Streamlit web app
 │   ├── streamlit_app.py          # entry point and page navigation
 │   ├── bootstrap.py              # src/ on sys.path, secrets -> env, database init
@@ -68,6 +68,7 @@ The project root is the nearest folder above the current directory that holds `p
 Opens on http://localhost:8501. There is no login. Pages:
 
 - **New run**: upload a commented PDF (or use the bundled sample), choose the planner, set the engineer inputs, optionally add a human-revised PDF to verify against, and run. Results show the KPIs, the sheet overview, every comment with its before/after images, the engineer checklist, the verification (if requested) and downloads for the corrected PDFs, reports, JSON and a ZIP of everything.
+- **Change review**: each applied change (CH-xx) can be approved or rejected, with an optional reviewer note, or all pending changes approved at once. Decisions are saved immediately in SQLite and written to `approvals.json` in the run folder, which is included in the downloads.
 - **Run history**: every run is stored in SQLite (`data/rectify.db`) with its files in `data/runs/<run id>/`. Select a run to open it again or delete it.
 - **About**: the process, outputs and known limits.
 
@@ -75,7 +76,7 @@ The rules planner is the default because it costs nothing. The Claude planner ap
 
 ### Deploy free on Streamlit Community Cloud
 
-1. Push this folder to a GitHub repository (it is the repository root). Keep the repository private: `samples/` holds client drawings.
+1. Push this folder to a GitHub repository (it is the repository root). Client PDFs are git-ignored, so the hosted app has no sample drawing: the client uploads their own PDF, and the "Use the sample drawing" option only appears where `samples/` holds the files.
 2. On share.streamlit.io choose **Create app**, select the repository and branch, and set **Main file path** to `app/streamlit_app.py`. Python 3.11 or later.
 3. Optional: under **Advanced settings > Secrets**, add `ANTHROPIC_API_KEY = "..."` to enable the Claude planner. Anyone with the app link can then spend API credit, so leave it out for an open demo.
 
@@ -119,9 +120,21 @@ These are facts the drawing doesn't contain. They get applied instead of guessed
   "backbox_size": "75x75x50mm",
   "conduit": {"size_mm": 20, "area_mm2": 219.0, "max_fill_pct": 40.0},
   "conduit_overrides": {"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}},
-  "cable_qty": {"CAT6 / Fibre": 2}
+  "cable_qty": {"CAT6 / Fibre": 2},
+  "elevations": {"PIR": "2400", "L1.2": "1200"},
+  "reference_pdf": "..\\drawings\\<architectural background>.pdf"
 }
 ```
+
+- `elevations`: mounting height per device type, for example from the RFI response. Devices without an `H=…mm` label are always listed and marked orange in `corrected_highlighted.pdf`. The label is drawn only for types given here.
+- `reference_pdf` (or `--reference`): the architectural drawing that shows the space IDs. Its room names and IDs are copied onto the sheet at the aligned positions. If it's missing, the "restore space IDs" comment is reported as **ready to fix**, with that drawing named as the input needed.
+- `reference_offset` (optional): `[dx, dy]` in points, used when the reference can't be aligned automatically.
+
+Every comment ends with one status in `report.html` and `changes.json` (`resolution`):
+- **resolved**: fixed on the drawing
+- **partially resolved**: some edits applied, items left over
+- **ready to fix**: applies automatically once the listed inputs are supplied
+- **needs engineer**: a decision or drafting work no input can replace
 
 ## LLM choice and cost
 

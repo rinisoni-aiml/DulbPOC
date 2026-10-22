@@ -3,5 +3,5 @@ anthropic>=0.70
 pillow>=10
 numpy>=1.26
 python-dotenv>=1.0
-streamlit>=1.40
+streamlit>=1.50
 pandas>=2.0

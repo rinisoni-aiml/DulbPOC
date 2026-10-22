@@ -25,6 +25,7 @@ def render():
         st.info("No runs yet. Start one from the New run page.")
         return
 
+    counts = runs.decision_counts()
     table = pd.DataFrame([{
         "Date": _when(r["created_at"]),
         "Drawing": clean(r["source_name"]),
@@ -33,10 +34,12 @@ def render():
         "Comments": r["comments"],
         "Edits": r["edits"],
         "Checklist": r["checklist_items"],
+        "Approved": counts.get(r["id"], {}).get("approved", 0),
+        "Rejected": counts.get(r["id"], {}).get("rejected", 0),
         "Verified": "Yes" if r["verify_summary"] else "No",
         "Time (s)": round(r["duration_s"]) if r["duration_s"] is not None else None,
     } for r in rows])
-    event = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun",
+    event = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun",
                          selection_mode="single-row", key="history-table")
     picked = event.selection.rows
     if not picked:
@@ -46,7 +49,7 @@ def render():
     st.divider()
     c1, c2 = st.columns([4, 1])
     c1.subheader(clean(run["source_name"]))
-    with c2.popover("Delete run", use_container_width=True):
+    with c2.popover("Delete run", width="stretch"):
         st.write("This removes the run and all of its files.")
         if st.button("Confirm delete", type="primary", key=f"del-{run['id']}"):
             runs.delete_run(run["id"])

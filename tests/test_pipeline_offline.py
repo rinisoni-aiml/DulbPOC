@@ -32,7 +32,9 @@ def test_rules_plan_and_apply(extracted, sample_pdf):
     changes, failures = r.run(p)
     r.save(out / "corrected.pdf")
 
-    assert not failures
+    # Only "waiting for input" remains: space IDs need the architectural drawing, elevations need heights.
+    assert {f["op"] for f in failures} == {"place_space_ids", "mark_missing_elevations"}
+    assert all(f["kind"] == "input" for f in failures)
     assert {c["op"] for c in changes} == {"replace_text", "swap_symbol", "add_conduit_fill_table"}
     page = pymupdf.open(out / "corrected.pdf")[0]
     assert not list(page.annots())

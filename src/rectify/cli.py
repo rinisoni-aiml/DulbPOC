@@ -19,7 +19,7 @@ def cmd_extract(a):
 
 def cmd_plan(a):
     try:
-        r = svc.plan_fixes(svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs), a.planner)
+        r = svc.plan_fixes(svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs, a.reference), a.planner)
     except svc.RectifyError as e:
         raise SystemExit(str(e)) from None
     cost = f", ${r['usage']['usd']:.3f}" if r["usage"] else ""
@@ -29,11 +29,14 @@ def cmd_plan(a):
 
 
 def cmd_apply(a):
-    applied, report = svc.apply_fixes(a.pdf, svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs))
+    applied, report = svc.apply_fixes(a.pdf, svc.output_dir(a.pdf, a.out), svc.load_inputs(a.inputs, a.reference))
     print(f"apply: {applied['edits']} edits, {applied['skipped']} already covered, {applied['failures']} ops left "
-          f"for the engineer, {applied['markups_removed']} markups removed -> {applied['path']}")
-    print(f"report: {report['checklist_items']} checklist items, {report['integrity']['share']:.4%} of sheet changed "
-          f"outside edits -> {report['path']}")
+          f"for the engineer, {applied['markups_removed']} markups removed, {applied['missing_elevations']} devices "
+          f"without an elevation label -> {applied['path']}")
+    r = report["resolution"]
+    print(f"report: {r['resolved']} resolved, {r['partially_resolved']} partially resolved, {r['ready_to_fix']} ready "
+          f"to fix once inputs are given, {r['needs_engineer']} need an engineer; {report['integrity']['share']:.4%} "
+          f"of sheet changed outside edits -> {report['path']}")
 
 
 def cmd_verify(a):
@@ -57,7 +60,8 @@ def main(argv=None):
         sp = sub.add_parser(name)
         sp.add_argument("pdf", help="consultant-commented drawing PDF")
         sp.add_argument("--out", help="output folder (default out/<pdf name>)")
-        sp.add_argument("--inputs", help="engineer inputs JSON (backbox size, conduit spec, ...)")
+        sp.add_argument("--inputs", help="engineer inputs JSON (backbox size, conduit spec, elevations, ...)")
+        sp.add_argument("--reference", help="architectural reference PDF with space IDs (for 'restore space IDs')")
         sp.add_argument("--planner", choices=["auto", "llm", "rules"], default="auto",
                         help="auto = Claude if ANTHROPIC_API_KEY is set, else the rules baseline")
         sp.set_defaults(fn=fn)

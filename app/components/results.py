@@ -9,15 +9,19 @@ import pymupdf
 import streamlit as st
 
 from components.theme import badge, clean
+from rectify.db import runs
 
 STATUS = {"auto": ("Applied", "ok"), "partial": ("Partially applied", "warn"), "engineer": ("Engineer action", "muted")}
 VERDICT = {"Fixed": "ok", "Partially fixed": "warn", "Not fixed": "fail"}
+REVIEW = {"Pending": None, "Approve": "approved", "Reject": "rejected"}
+REVIEW_BADGE = {None: ("Pending review", "muted"), "approved": ("Approved", "ok"), "rejected": ("Rejected", "fail")}
 DOWNLOADS = [
     ("corrected.pdf", "Corrected drawing (PDF)", "application/pdf"),
     ("corrected_highlighted.pdf", "Corrected drawing with highlighted changes (PDF)", "application/pdf"),
     ("report.html", "Rectification report (HTML)", "text/html"),
     ("checklist.md", "Engineer checklist (Markdown)", "text/markdown"),
     ("verification_report.html", "Verification report (HTML)", "text/html"),
+    ("approvals.json", "Reviewer decisions (JSON)", "application/json"),
     ("changes.json", "Changes (JSON)", "application/json"),
     ("plan.json", "Fix plan (JSON)", "application/json"),
     ("comments.json", "Extracted comments (JSON)", "application/json"),
@@ -75,7 +79,7 @@ def render_run(run, key):
     names = ["Summary", "Drawing", "Engineer checklist"] + (["Verification"] if ver else []) + ["Downloads"]
     tabs = dict(zip(names, st.tabs(names)))
     with tabs["Summary"]:
-        _summary(d, ex, plan, chg)
+        _summary(d, ex, plan, chg, run, key)
     with tabs["Drawing"]:
         _drawing(d, key)
     with tabs["Engineer checklist"]:
@@ -87,14 +91,16 @@ def render_run(run, key):
         _downloads(d, run, key)
 
 
-def _summary(d, ex, plan, chg):
+def _summary(d, ex, plan, chg, run, key):
     if (d / "overview.png").exists():
         st.image(str(d / "overview.png"), caption="Whole sheet. Orange: consultant comments. Red: applied edits.",
-                 use_container_width=True)
+                 width="stretch")
     status = {p["comment_id"]: p for p in plan["comments"]}
     by_comment = {}
     for ch in chg["changes"]:
         by_comment.setdefault(ch["comment_id"], []).append(ch)
+    decisions = runs.get_decisions(run["id"])
+    _review_panel(run, chg["changes"], decisions, key)
     st.subheader("Comments")
     for c in ex["comments"]:
         p = status.get(c["id"], {})
@@ -107,7 +113,9 @@ def _summary(d, ex, plan, chg):
             if p.get("intent"):
                 st.markdown(f"**Intent:** {clean(p['intent'])}")
             for ch in by_comment.get(c["id"], []):
-                st.markdown(f"**{ch['id']}:** {clean(ch['description'])}")
+                label, kind = REVIEW_BADGE[(decisions.get(ch["id"]) or {}).get("decision")]
+                st.markdown(f"**{ch['id']}:** {clean(ch['description'])} &nbsp; {badge(label, kind)}",
+                            unsafe_allow_html=True)
                 if ch.get("image") and (d / ch["image"]).exists():
                     st.image(str(d / ch["image"]), caption=f"{ch['id']}: before (left) and after (right)")
             for s in chg.get("skipped", []):
@@ -124,7 +132,7 @@ def _summary(d, ex, plan, chg):
     if others:
         st.subheader("Other markups (not comments)")
         st.dataframe(pd.DataFrame([{"Kind": o["kind"], "Text": clean(o["text"]) or "-", "Author": o.get("author", "")}
-                                   for o in others]), hide_index=True, use_container_width=True)
+                                   for o in others]), hide_index=True, width="stretch")
 
 
 def _drawing(d, key):
@@ -137,7 +145,7 @@ def _drawing(d, key):
     dpi = c2.select_slider("Resolution (DPI)", options=[50, 75, 100, 150], value=75, key=f"dpi-{key}")
     path = options[choice]
     with st.spinner("Rendering sheet"):
-        st.image(_render_page(str(path), path.stat().st_mtime, dpi), use_container_width=True)
+        st.image(_render_page(str(path), path.stat().st_mtime, dpi), width="stretch")
 
 
 def _checklist(plan, chg):
@@ -153,7 +161,7 @@ def _checklist(plan, chg):
         st.success("No open items for the engineer.")
         return
     st.caption("Items the rectifier could not settle from the drawing alone.")
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
                  column_config={"Action": st.column_config.TextColumn(width="large"),
                                 "Inputs needed": st.column_config.TextColumn(width="medium")})
 
@@ -169,7 +177,7 @@ def _verification(d, ver, revised_name):
     st.subheader("File checks")
     st.dataframe(pd.DataFrame([{"Check": clean(c["check"]), "Result": "Pass" if c["ok"] else "Fail",
                                 "Detail": clean(c["detail"])} for c in ver["checks"]]),
-                 hide_index=True, use_container_width=True)
+                 hide_index=True, width="stretch")
     st.subheader("Per comment")
     for r in ver["comments"]:
         with st.container(border=True):
@@ -180,7 +188,7 @@ def _verification(d, ver, revised_name):
                 st.markdown("\n".join(f"- {clean(i)}" for i in r["open_items"]))
             if r.get("image") and (d / r["image"]).exists():
                 with st.expander("Original, corrected and human revision"):
-                    st.image(str(d / r["image"]), use_container_width=True)
+                    st.image(str(d / r["image"]), width="stretch")
 
 
 def _downloads(d, run, key):
@@ -189,7 +197,54 @@ def _downloads(d, run, key):
         f = d / name
         if f.exists():
             st.download_button(label, f.read_bytes(), file_name=f"{stem}_{name}", mime=mime,
-                               key=f"dl-{key}-{name}", use_container_width=True,
+                               key=f"dl-{key}-{name}", width="stretch",
                                type="primary" if name == "corrected.pdf" else "secondary")
     st.download_button("All outputs (ZIP)", _zip_folder(str(d), d.stat().st_mtime), file_name=f"{stem}_outputs.zip",
-                       mime="application/zip", key=f"dl-{key}-zip", use_container_width=True)
+                       mime="application/zip", key=f"dl-{key}-zip", width="stretch")
+
+
+def _choice_label(decision):
+    return next(label for label, value in REVIEW.items() if value == decision)
+
+
+def _save_decision(run_id, ch, wkey):
+    choice = REVIEW[st.session_state[f"{wkey}-choice"]]
+    note = st.session_state.get(f"{wkey}-note", "") if choice else ""
+    runs.set_decision(run_id, ch["id"], choice, ch["comment_id"], note)
+
+
+def _approve_pending(run_id, changes, decisions, key):
+    for ch in changes:
+        if ch["id"] not in decisions:
+            runs.set_decision(run_id, ch["id"], "approved", ch["comment_id"])
+        st.session_state.pop(f"rev-{key}-{ch['id']}-choice", None)  # widgets re-read the stored decision
+
+
+def _review_panel(run, changes, decisions, key):
+    """Approve or reject each applied change. Decisions are saved at once (SQLite + approvals.json)."""
+    if not changes:
+        return
+    approved = sum(d["decision"] == "approved" for d in decisions.values())
+    rejected = sum(d["decision"] == "rejected" for d in decisions.values())
+    pending = len(changes) - approved - rejected
+    st.subheader("Change review")
+    st.caption("Approve or reject each change applied to the drawing. Decisions are saved immediately and "
+               "included in the downloads as approvals.json.")
+    cols = st.columns([1, 1, 1, 2])
+    cols[0].metric("Approved", approved)
+    cols[1].metric("Rejected", rejected)
+    cols[2].metric("Pending", pending)
+    cols[3].button("Approve all pending", key=f"approve-all-{key}", disabled=pending == 0,
+                   on_click=_approve_pending, args=(run["id"], changes, decisions, key))
+    for ch in changes:
+        dec = decisions.get(ch["id"]) or {}
+        wkey = f"rev-{key}-{ch['id']}"
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3, 2, 3], vertical_alignment="center")
+            c1.markdown(f"**{ch['id']}** ({ch['comment_id']}): {clean(ch['description'])}")
+            c2.radio("Decision", list(REVIEW), index=list(REVIEW).index(_choice_label(dec.get("decision"))),
+                     horizontal=True, key=f"{wkey}-choice", label_visibility="collapsed",
+                     on_change=_save_decision, args=(run["id"], ch, wkey))
+            c3.text_input("Reviewer note", value=dec.get("note", ""), key=f"{wkey}-note",
+                          placeholder="Reviewer note (optional)", label_visibility="collapsed",
+                          disabled=not dec, on_change=_save_decision, args=(run["id"], ch, wkey))

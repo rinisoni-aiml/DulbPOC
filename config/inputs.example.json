@@ -2,5 +2,7 @@
   "backbox_size": "75x75x50mm",
   "conduit": {"size_mm": 20, "area_mm2": 219.0, "max_fill_pct": 40.0},
   "conduit_overrides": {"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}},
-  "cable_qty": {}
+  "cable_qty": {},
+  "elevations": {},
+  "reference_pdf": null
 }

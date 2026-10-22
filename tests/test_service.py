@@ -11,7 +11,10 @@ def test_rectify_rules(sample_pdf, tmp_path):
     assert seen == ["extract", "plan", "apply", "report"]
     assert (r["extract"]["comments"], r["extract"]["tips"]) == (9, 15)
     assert r["plan"]["planner"] == "rules" and r["plan"]["usage"] is None
-    assert r["apply"]["edits"] == 5 and r["apply"]["failures"] == 0 and r["apply"]["markups_removed"] == 24
+    assert r["apply"]["edits"] == 5 and r["apply"]["markups_removed"] == 24
+    assert r["apply"]["failures"] == 2  # waiting for inputs: architectural drawing, device heights
+    assert r["apply"]["missing_elevations"] > 0
+    assert sum(r["report"]["resolution"].values()) == 9
     for name in ("corrected.pdf", "corrected_highlighted.pdf", "report.html", "checklist.md", "overview.png"):
         assert (tmp_path / name).exists()
 
