@@ -31,6 +31,13 @@ def render():
 - Symbol swaps handle devices drawn in the same orientation as the legend. Rotated devices go to the checklist.
 - Edited text uses the closest available font. On the hosted demo (Linux) Windows fonts are not installed, so edits fall back to Helvetica.
 - Runs stored on the hosted demo are temporary and may be cleared when the app restarts.
+
+#### Where data is stored
+
+- **Uploaded drawings and generated files** are kept on the app server, one folder per run: the uploaded PDFs, the corrected PDFs, images, reports and JSON files.
+- **Run history and review decisions** are kept in a small SQLite database on the same server.
+- **Downloads** go straight to your computer. Download anything you want to keep, because the hosted demo storage is temporary.
+- **Claude planner**: to plan the fixes, the comment text, the text found on the sheet (legend and labels), small image crops around each comment and the engineer inputs are sent to the Anthropic API. The drawing file itself is not uploaded.
 """)
-    st.caption(f"Planner model: {config.PLANNER_MODEL} | Claude planner "
-               f"{'available' if config.ANTHROPIC_API_KEY else 'not configured (rules planner only)'}")
+    if config.ANTHROPIC_API_KEY:
+        st.caption(f"Planner model: {config.PLANNER_MODEL}")

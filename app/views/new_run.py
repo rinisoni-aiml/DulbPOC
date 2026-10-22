@@ -16,7 +16,32 @@ from rectify.services import rectification as svc
 
 SAMPLE_PDF = config.SAMPLES_DIR / "DG-NCD-401-0601-ECJ-SDW-SE-2B1-7003447_PDF_01.pdf"
 SAMPLE_REVISED = config.SAMPLES_DIR / "DG-NCD-401-0601-ECJ-SDW-SE-2B1-7003447_PDF_02-revised.pdf"
-PLANNERS = {"rules": "Rules (offline, no API cost)", "llm": "Claude (LLM planner)"}
+HELP = {
+    "source": "The drawing PDF with the consultant's review comments as PDF markups (callouts, leader lines, "
+              "boxes). Comments are read from the markups directly, so scanned or flattened comments are not "
+              "supported.",
+    "backbox": "Used when a comment asks for back box sizes: the size is written into the legend, for example "
+               "75x75x50mm. Leave empty to list it for the engineer instead.",
+    "conduit_size": "Nominal conduit size used in the conduit fill table, when a comment asks for a fill "
+                    "calculation.",
+    "conduit_area": "Internal cross-section area of that conduit. Fill % is the total cable area divided by this "
+                    "area.",
+    "max_fill": "Maximum allowed conduit fill from the project standard (40% is typical). Spare capacity is "
+                "measured against it.",
+    "overrides": 'Use a different conduit for specific cable types, for example '
+                 '{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}. Leave {} if all cables share one conduit.',
+    "cable_qty": 'Number of cables of a type in one conduit, when more than one, for example {"CAT6 / Fibre": 2}. '
+                 'Types not listed count as 1.',
+    "device_type": "Device type code as shown in the device tag on the drawing, for example PIR or L1.2.",
+    "height": "Mounting height in millimetres, for example 2400.",
+    "reference": "Needed only when a comment asks to restore room names or space IDs. Upload the architectural "
+                 "background of the same area; its room names and IDs are copied onto the sheet.",
+    "reference_file": "Architectural background PDF of the same floor area, showing room names and space IDs.",
+    "revised": "Optional check. Upload the drafter's revised version of the same sheet to compare it with the "
+               "corrected drawing, comment by comment. No API cost.",
+    "revised_file": "The human-revised drawing PDF of the same sheet.",
+    "run": "Processing takes about one to two minutes per sheet. Results appear below when it finishes.",
+}
 STAGES = {"extract": "Reading consultant comments", "plan": "Planning fixes",
           "apply": "Applying vector edits", "report": "Building report and images"}
 
@@ -46,12 +71,12 @@ def _save(source, folder):
 
 
 def _pick_pdf(label, sample, key, help_text):
-    options = ["Upload a PDF"] + (["Use the sample drawing"] if sample.exists() else [])
-    mode = st.radio(label, options, horizontal=True, key=f"{key}-mode")
-    if mode == "Upload a PDF":
-        return st.file_uploader(help_text, type=["pdf"], key=f"{key}-file")
-    st.caption(f"Sample: {sample.name}")
-    return sample
+    """File uploader; offers the local sample drawing as well when samples/ holds it."""
+    if sample.exists() and st.radio(label, ["Upload a PDF", "Use the sample drawing"], horizontal=True,
+                                    key=f"{key}-mode") == "Use the sample drawing":
+        st.caption(f"Sample: {sample.name}")
+        return sample
+    return st.file_uploader(label, type=["pdf"], key=f"{key}-file", help=help_text)
 
 
 def _cell(v):
@@ -62,14 +87,14 @@ def _cell(v):
 
 def _elevations(defaults):
     st.markdown("**Device elevations**")
-    st.caption("Mounting height per device type, for example from the RFI response. Devices of these types "
-               "without an H=...mm label get one added; all others are listed for the engineer.")
+    st.caption("Optional. Mounting height per device type, for example from the RFI response. Devices of these "
+               "types without an H=...mm label get one added; all others are listed for the engineer.")
     table = st.data_editor(
         pd.DataFrame([{"Device type": k, "Height (mm)": str(v)} for k, v in defaults.items()],
                      columns=["Device type", "Height (mm)"], dtype="object"),
         num_rows="dynamic", hide_index=True, width="stretch", key="elevations",
-        column_config={"Device type": st.column_config.TextColumn(help="Type code as on the drawing, e.g. PIR"),
-                       "Height (mm)": st.column_config.TextColumn(help="Mounting height in mm, e.g. 2400")})
+        column_config={"Device type": st.column_config.TextColumn(help=HELP["device_type"]),
+                       "Height (mm)": st.column_config.TextColumn(help=HELP["height"])})
     out = {}
     for _, row in table.iterrows():
         kind, height = _cell(row.get("Device type")), _cell(row.get("Height (mm)"))
@@ -87,13 +112,18 @@ def _inputs_form():
     st.markdown("**Engineer inputs**")
     st.caption("Facts the drawing does not contain. They are applied as given, never guessed.")
     c1, c2, c3, c4 = st.columns(4)
-    backbox = c1.text_input("Back box size", d.get("backbox_size", ""), help="Example: 75x75x50mm")
-    size = c2.number_input("Conduit size (mm)", value=float(conduit["size_mm"]), min_value=1.0, step=1.0)
-    area = c3.number_input("Conduit area (mm2)", value=float(conduit["area_mm2"]), min_value=1.0, step=1.0)
-    fill = c4.number_input("Max fill (%)", value=float(conduit["max_fill_pct"]), min_value=1.0, max_value=100.0)
+    backbox = c1.text_input("Back box size", d.get("backbox_size", ""), help=HELP["backbox"])
+    size = c2.number_input("Conduit size (mm)", value=float(conduit["size_mm"]), min_value=1.0, step=1.0,
+                           help=HELP["conduit_size"])
+    area = c3.number_input("Conduit area (mm2)", value=float(conduit["area_mm2"]), min_value=1.0, step=1.0,
+                           help=HELP["conduit_area"])
+    fill = c4.number_input("Max fill (%)", value=float(conduit["max_fill_pct"]), min_value=1.0, max_value=100.0,
+                           help=HELP["max_fill"])
     with st.expander("Advanced: per-cable conduit overrides and cable quantities (JSON)"):
-        overrides = st.text_area("Conduit overrides", json.dumps(d.get("conduit_overrides", {}), indent=2), height=110)
-        qty = st.text_area("Cable quantities", json.dumps(d.get("cable_qty", {}), indent=2), height=80)
+        overrides = st.text_area("Conduit overrides", json.dumps(d.get("conduit_overrides", {}), indent=2),
+                                 height=110, help=HELP["overrides"])
+        qty = st.text_area("Cable quantities", json.dumps(d.get("cable_qty", {}), indent=2), height=80,
+                           help=HELP["cable_qty"])
     inputs = {"conduit": {"size_mm": int(size) if size.is_integer() else size, "area_mm2": area,
                           "max_fill_pct": fill}}
     if backbox.strip():
@@ -126,6 +156,8 @@ def _run(source, revised, reference, planner, inputs):
             st.write(f"{STAGES['extract']}...")
             result = svc.rectify(pdf, run_dir, inputs, planner, progress)
             runs.finish_run(run_id, result)
+            for w in result["plan"]["warnings"]:
+                st.warning(clean(w))
             if revised is not None:
                 st.write("Verifying against the revised drawing...")
                 rev = _save(revised, run_dir / "revised")
@@ -144,31 +176,24 @@ def render():
     header("Drawing rectification",
            "Upload a consultant-commented drawing PDF. Comments are read from the PDF, applied to the drawing as "
            "vector edits and removed, and anything that needs an engineer goes on a checklist.")
-    has_key = bool(config.ANTHROPIC_API_KEY)
+    # Claude plans the fixes whenever an API key is configured; the offline rules planner is the fallback
+    # (and what the local tests use).
+    planner = "llm" if config.ANTHROPIC_API_KEY else "rules"
 
     with st.container(border=True):
-        source = _pick_pdf("Commented drawing", SAMPLE_PDF, "src", "Consultant-commented drawing (PDF)")
-        st.divider()
-        planners = ["rules", "llm"] if has_key else ["rules"]
-        planner = st.selectbox("Fix planner", planners, format_func=PLANNERS.get)
-        if planner == "llm":
-            st.caption(f"Uses {config.PLANNER_MODEL} through the Anthropic API, about $0.25 to $0.50 per sheet.")
-        if not has_key:
-            st.caption("The Claude planner is not available because no API key is configured. "
-                       "The offline rules planner is used.")
+        source = _pick_pdf("Commented drawing (PDF)", SAMPLE_PDF, "src", HELP["source"])
         st.divider()
         inputs, error = _inputs_form()
         st.divider()
         reference = None
-        if st.toggle("Add an architectural reference drawing",
-                     help="The architectural background that shows the room names and space IDs. They are "
-                          "copied onto the sheet for comments that ask to restore space IDs."):
-            reference = st.file_uploader("Architectural reference drawing (PDF)", type=["pdf"], key="ref-file")
+        if st.toggle("Add an architectural reference drawing", help=HELP["reference"]):
+            reference = st.file_uploader("Architectural reference drawing (PDF)", type=["pdf"], key="ref-file",
+                                         help=HELP["reference_file"])
         revised = None
-        if st.toggle("Also verify against a human-revised drawing",
-                     help="Compares the corrected drawing with a revision made by a drafter. No API cost."):
-            revised = _pick_pdf("Revised drawing", SAMPLE_REVISED, "rev", "Human-revised drawing (PDF)")
-        start = st.button("Run rectification", type="primary", disabled=source is None or error is not None)
+        if st.toggle("Also verify against a human-revised drawing", help=HELP["revised"]):
+            revised = _pick_pdf("Revised drawing (PDF)", SAMPLE_REVISED, "rev", HELP["revised_file"])
+        start = st.button("Run rectification", type="primary", disabled=source is None or error is not None,
+                          help=HELP["run"])
         if error:
             st.error(error)
 
