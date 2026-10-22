@@ -12,6 +12,11 @@ from components.theme import badge, clean
 from rectify.db import runs
 from rectify.pipeline.report import RESOLUTION_LABEL
 
+# resolution[*].input_keys -> label of the field on the New run page
+INPUT_FIELDS = {"backbox_size": "Back box size", "elevations": "Device elevations",
+                "reference_pdf": "Architectural reference drawing", "conduit": "Conduit size, area and max fill",
+                "cable_qty": "Cable quantities"}
+INPUTS_ANCHOR = "engineer-inputs"
 RESOLUTION_KIND = {"resolved": "ok", "partially_resolved": "warn", "ready_to_fix": "warn", "needs_engineer": "muted"}
 STATUS = {"auto": ("Applied", "ok"), "partial": ("Partially applied", "warn"), "engineer": ("Engineer action", "muted")}
 VERDICT = {"Fixed": "ok", "Partially fixed": "warn", "Not fixed": "fail"}
@@ -133,6 +138,8 @@ def _summary(d, ex, plan, chg, run, key):
             st.markdown(f"<div class='quote'>{clean(p.get('clean_text') or c['text'])}</div>", unsafe_allow_html=True)
             if p.get("intent"):
                 st.markdown(f"**Intent:** {clean(p['intent'])}")
+            if res:
+                _fix_hint(res, key)
             for ch in by_comment.get(c["id"], []):
                 label, kind = REVIEW_BADGE[(decisions.get(ch["id"]) or {}).get("decision")]
                 st.markdown(f"**{ch['id']}:** {clean(ch['description'])} &nbsp; {badge(label, kind)}",
@@ -160,6 +167,47 @@ def _summary(d, ex, plan, chg, run, key):
         st.subheader("Other markups (not comments)")
         st.dataframe(pd.DataFrame([{"Kind": o["kind"], "Text": clean(o["text"]) or "-", "Author": o.get("author", "")}
                                    for o in others]), hide_index=True, width="stretch")
+
+
+def suggestion_text(key, value):
+    if isinstance(value, dict):
+        unit = " mm" if key == "elevations" else ""
+        return ", ".join(f"{k} {v}{unit}" for k, v in value.items())
+    return str(value)
+
+
+def needed_inputs(run):
+    """Input fields the run's comments are waiting for, with sheet-derived suggestions (hints only)."""
+    if not run or run.get("status") != "done":
+        return [], {}
+    chg = _json(run["run_dir"] / "changes.json") or {}
+    keys, suggestions = [], {}
+    for r in chg.get("resolution", []):
+        if r["status"] in ("ready_to_fix", "partially_resolved"):
+            keys += [k for k in r.get("input_keys") or [] if k in INPUT_FIELDS and k not in keys]
+            for k, v in (r.get("suggestions") or {}).items():
+                if isinstance(v, dict):
+                    suggestions.setdefault(k, {}).update(v)
+                else:
+                    suggestions.setdefault(k, v)
+    return keys, suggestions
+
+
+def _fix_hint(res, key):
+    """'To fix this, fill: ...' for a comment waiting on engineer inputs."""
+    if res["status"] not in ("ready_to_fix", "partially_resolved"):
+        return
+    fields = [INPUT_FIELDS[k] for k in res.get("input_keys") or [] if k in INPUT_FIELDS]
+    if fields:
+        if key == "current":
+            links = ", ".join(f"[{f}](#{INPUTS_ANCHOR})" for f in fields)
+            st.markdown(f"**To fix this, fill:** {links} under Optional: engineer inputs above, then run again.")
+        else:
+            st.markdown(f"**To fix this, fill:** {', '.join(fields)} under Optional: engineer inputs on the "
+                        "New run page, then run again.")
+    for k, v in (res.get("suggestions") or {}).items():
+        st.caption(f"Values already used on this sheet for {INPUT_FIELDS.get(k, k).lower()}: "
+                   f"{suggestion_text(k, v)}. Enter them only if they are confirmed.")
 
 
 def _conduit_types(chg):

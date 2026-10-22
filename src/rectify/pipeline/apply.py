@@ -302,9 +302,11 @@ class Rectifier:
         table_rect, cables = find_cable_table(page, text_lines(page))
         if not cables:
             return self._fail(c, op, "no 'Cable Type' table with outer diameters found on the sheet")
-        spec, source = self.inputs.get("conduit"), "engineer inputs"
-        if not spec:
-            spec, source = sheet_conduit(text_lines(page))
+        spec, source = dict(self.inputs.get("conduit") or {}), "engineer inputs"
+        if not {"size_mm", "area_mm2"} & spec.keys():  # no conduit given (maybe only max fill): use the sheet's
+            sheet, sheet_source = sheet_conduit(text_lines(page))
+            source = f"{sheet_source}; max fill from engineer inputs" if spec else sheet_source
+            spec = {**(sheet or {}), **spec}
         rows, conduit = conduit_fill(cables, spec, self.inputs.get("cable_qty"),
                                      self.inputs.get("conduit_overrides"))
         cols = list(rows[0].keys())

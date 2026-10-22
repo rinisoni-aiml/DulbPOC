@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from components.results import render_run
+from components.results import INPUT_FIELDS, INPUTS_ANCHOR, needed_inputs, render_run, suggestion_text
 from components.theme import clean, header
 from rectify.core import config
 from rectify.db import runs
@@ -23,9 +23,10 @@ HELP = {
     "backbox": "Used when a comment asks for back box sizes: the size is written into the legend, for example "
                "75x75x50mm. Leave empty to list it for the engineer instead.",
     "conduit_size": "Nominal conduit size used in the conduit fill table, when a comment asks for a fill "
-                    "calculation. Leave empty to use the standard 20 mm conduit; the table states the values used.",
+                    "calculation. Leave empty to use the conduit size stated on the drawing (20 mm if it states "
+                    "none); the table footnote states the values used.",
     "conduit_area": "Internal cross-section area of that conduit. Fill % is the total cable area divided by this "
-                    "area. Leave empty to use 219 mm2 (standard 20 mm conduit).",
+                    "area. Leave empty to use the standard area for the conduit size.",
     "max_fill": "Maximum allowed conduit fill from the project standard. Spare capacity is measured against it. "
                 "Leave empty to use 40%.",
     "overrides": 'Use a different conduit for specific cable types, for example '
@@ -41,6 +42,10 @@ HELP = {
     "revised": "Optional check. Upload the drafter's revised version of the same sheet to compare it with the "
                "corrected drawing, comment by comment. No API cost.",
     "revised_file": "The human-revised drawing PDF of the same sheet.",
+    "revision": "Adds a new row to the drawing's revision table and updates the revision number and date in the "
+                "title block, as a drafter would when reissuing the sheet.",
+    "revision_date": "Date for the new revision. Leave empty to use today's date.",
+    "revision_text": "Description for the new revision row. Leave empty for the standard wording.",
     "run": "Processing takes about one to two minutes per sheet. Results appear below when it finishes.",
 }
 STAGES = {"extract": "Reading consultant comments", "plan": "Planning fixes",
@@ -79,10 +84,13 @@ def _cell(v):
     return str(v).strip()
 
 
-def _elevations(defaults):
+def _elevations(defaults, suggestion=None):
     st.markdown("**Device elevations**")
     st.caption("Optional. Mounting height per device type, for example from the RFI response. Devices of these "
                "types without an H=...mm label get one added; all others are listed for the engineer.")
+    if suggestion:
+        st.caption(f"Heights already used on this sheet for these types: {suggestion_text('elevations', suggestion)}. "
+                   "Enter them only if they are confirmed.")
     table = st.data_editor(
         pd.DataFrame([{"Device type": k, "Height (mm)": str(v)} for k, v in defaults.items()],
                      columns=["Device type", "Height (mm)"], dtype="object"),
@@ -100,18 +108,40 @@ def _elevations(defaults):
     return out, None
 
 
-def _inputs_form():
+def _revision():
+    st.markdown("**Drawing revision**")
+    bump = st.checkbox("Add a revision entry to the drawing", value=True, help=HELP["revision"])
+    c1, c2 = st.columns([1, 2])
+    date = c1.date_input("Revision date", value=None, format="DD/MM/YYYY", disabled=not bump,
+                         help=HELP["revision_date"])
+    text = c2.text_input("Revision description", placeholder="Revised as per consultant comments",
+                         disabled=not bump, help=HELP["revision_text"])
+    rev = {"bump": bump}
+    if bump and date:
+        rev["date"] = date.strftime("%d/%m/%y")
+    if bump and text.strip():
+        rev["description"] = text.strip()
+    return rev
+
+
+def _inputs_form(needed=(), suggestions=None):
     """Optional engineer inputs, all empty by default: the PDF alone is enough to run. Only values the user
-    enters are applied; fixes that need a missing value are reported as ready to fix."""
-    with st.expander("Optional: engineer inputs"):
+    enters are applied; fixes that need a missing value are reported as ready to fix. Opens by itself when the
+    last run is waiting for inputs."""
+    suggestions = suggestions or {}
+    st.markdown(f"<div id='{INPUTS_ANCHOR}'></div>", unsafe_allow_html=True)
+    with st.expander("Optional: engineer inputs", expanded=bool(needed)):
         st.caption("Facts the drawing does not contain, such as sizes from the project specification. Leave "
                    "everything empty to process the PDF alone; anything entered is applied as given, never guessed.")
+        if needed:
+            st.info("The last run is waiting for: " + ", ".join(INPUT_FIELDS[k] for k in needed)
+                    + ". Fill what you have and run again.")
         c1, c2, c3, c4 = st.columns(4)
         backbox = c1.text_input("Back box size", placeholder="e.g. 75x75x50mm", help=HELP["backbox"])
         size = c2.number_input("Conduit size (mm)", value=None, min_value=1.0, step=1.0,
-                               placeholder=f"Default {config.CONDUIT['size_mm']:g}", help=HELP["conduit_size"])
+                               placeholder="From drawing", help=HELP["conduit_size"])
         area = c3.number_input("Conduit area (mm2)", value=None, min_value=1.0, step=1.0,
-                               placeholder=f"Default {config.CONDUIT['area_mm2']:g}", help=HELP["conduit_area"])
+                               placeholder="Standard for size", help=HELP["conduit_area"])
         fill = c4.number_input("Max fill (%)", value=None, min_value=1.0, max_value=100.0,
                                placeholder=f"Default {config.CONDUIT['max_fill_pct']:g}", help=HELP["max_fill"])
         st.markdown("**Per-cable conduit overrides and cable quantities (JSON)**")
@@ -120,7 +150,15 @@ def _inputs_form():
                                  placeholder='{"230VAC mains": {"size_mm": 25, "area_mm2": 346.4}}')
         qty = c6.text_area("Cable quantities", "", height=90, help=HELP["cable_qty"],
                            placeholder='{"CAT6 / Fibre": 2}')
-        heights, error = _elevations({})
+        heights, error = _elevations({}, suggestions.get("elevations"))
+        st.markdown("**Architectural reference drawing**")
+        reference = None
+        if st.toggle("Add an architectural reference drawing", help=HELP["reference"]):
+            reference = st.file_uploader("Architectural reference drawing (PDF)", type=["pdf"], key="ref-file",
+                                         help=HELP["reference_file"])
+        revision = _revision()
+    if error:
+        return None, None, error
     conduit = {k: v for k, v in (("size_mm", size), ("area_mm2", area), ("max_fill_pct", fill)) if v is not None}
     if "size_mm" in conduit and float(conduit["size_mm"]).is_integer():
         conduit["size_mm"] = int(conduit["size_mm"])
@@ -135,12 +173,11 @@ def _inputs_form():
             if value:
                 inputs[field] = value
     except ValueError as e:
-        return None, f"Conduit overrides and cable quantities must be valid JSON objects: {e}"
-    if error:
-        return None, error
+        return None, None, f"Conduit overrides and cable quantities must be valid JSON objects: {e}"
     if heights:
         inputs["elevations"] = heights
-    return inputs, None
+    inputs["revision"] = revision
+    return inputs, reference, None
 
 
 def _run(source, revised, reference, planner, inputs):
@@ -185,16 +222,14 @@ def render():
     # Claude plans the fixes whenever an API key is configured; the offline rules planner is the fallback
     # (and what the local tests use).
     planner = "llm" if config.ANTHROPIC_API_KEY else "rules"
+    last = st.session_state.get("current_run")
+    needed, suggestions = needed_inputs(runs.get_run(last) if last else None)
 
     with st.container(border=True):
         source = _pick_pdf("Commented drawing (PDF)", SAMPLE_PDF, "src", HELP["source"])
         st.divider()
-        inputs, error = _inputs_form()
+        inputs, reference, error = _inputs_form(needed, suggestions)
         st.divider()
-        reference = None
-        if st.toggle("Add an architectural reference drawing", help=HELP["reference"]):
-            reference = st.file_uploader("Architectural reference drawing (PDF)", type=["pdf"], key="ref-file",
-                                         help=HELP["reference_file"])
         revised = None
         if st.toggle("Also verify against a human-revised drawing", help=HELP["revised"]):
             revised = _pick_pdf("Revised drawing (PDF)", SAMPLE_REVISED, "rev", HELP["revised_file"])
